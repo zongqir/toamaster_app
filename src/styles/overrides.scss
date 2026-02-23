@@ -1,0 +1,42 @@
+taro-button-core+taro-button-core {
+  margin-top: 0;
+}
+
+body {
+  taro-input-core {
+    height: auto;
+    min-height: 0;
+    width: 100%;
+    display: block;
+    line-height: 1.35;
+  }
+
+  taro-input-core .taro-input,
+  taro-input-core input {
+    line-height: 1.35;
+    min-height: 1.35em;
+    width: 100%;
+  }
+
+  taro-button-core {
+    width: unset;
+    padding: 0 14px;
+    line-height: 2.55;
+  }
+
+  /* 针对不同 size 的按钮进行优化 */
+  taro-button-core[size="mini"] {
+    padding: 0 10px;
+    line-height: 2.3;
+  }
+
+  taro-textarea-core {
+    display: flex;
+  }
+
+  taro-textarea-core > .taro-textarea{
+    height: unset;
+    background-color: transparent;
+    font-size: inherit;
+  }
+}

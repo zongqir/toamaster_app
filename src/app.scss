@@ -1,0 +1,419 @@
+﻿@use 'tailwindcss/base';
+@use 'tailwindcss/components';
+@use 'tailwindcss/utilities';
+
+:root {
+  --background: 214 52% 8%;
+  --foreground: 210 36% 97%;
+  --card: 216 44% 12%;
+  --card-foreground: 210 36% 97%;
+  --popover: 214 52% 8%;
+  --popover-foreground: 210 36% 97%;
+  --primary: 189 91% 47%;
+  --primary-foreground: 212 60% 9%;
+  --secondary: 216 24% 20%;
+  --secondary-foreground: 210 36% 97%;
+  --muted: 216 24% 20%;
+  --muted-foreground: 214 24% 90%;
+  --accent: 45 94% 55%;
+  --accent-foreground: 217 50% 12%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214 26% 30%;
+  --input: 214 26% 24%;
+  --ring: 189 91% 47%;
+  --radius: 0.95rem;
+
+  --color-yellow: 45 88% 34%;
+  --color-red: 0 74% 46%;
+  --color-green: 142 66% 32%;
+
+  --gradient-page:
+    radial-gradient(1100px 520px at -8% -12%, hsl(187 88% 47% / 0.22), transparent 48%),
+    radial-gradient(860px 500px at 108% -14%, hsl(42 95% 56% / 0.16), transparent 42%),
+    linear-gradient(165deg, hsl(213 58% 11%), hsl(222 40% 7%));
+  --gradient-primary: linear-gradient(132deg, hsl(189 91% 47%), hsl(197 96% 42%));
+  --gradient-card: linear-gradient(170deg, hsl(215 39% 15% / 0.93), hsl(218 36% 11% / 0.93));
+  --gradient-card-soft: linear-gradient(165deg, hsl(216 33% 18% / 0.58), hsl(218 28% 12% / 0.58));
+  --shadow-soft: 0 10px 30px hsl(221 50% 3% / 0.35);
+  --shadow-strong: 0 20px 40px hsl(221 50% 3% / 0.45);
+  --glass-border: hsl(210 40% 99% / 0.18);
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+
+  page,
+  .taro_page,
+  body {
+    @apply text-foreground;
+    background: var(--gradient-page);
+    min-height: 100%;
+    font-family:
+      'Microsoft YaHei',
+      'PingFang SC',
+      'Hiragino Sans GB',
+      'Noto Sans SC',
+      'Segoe UI',
+      sans-serif;
+    font-size: 18.5px;
+    line-height: 1.56;
+    font-weight: 500;
+    -webkit-text-size-adjust: 100%;
+    overflow-x: hidden;
+  }
+
+  .taro_page {
+    position: relative;
+  }
+
+  view,
+  scroll-view {
+    min-width: 0;
+  }
+
+  /* Override Taro Button default style */
+  button {
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    line-height: inherit !important;
+    border: none !important;
+  }
+
+  button::after {
+    border: none !important;
+    background: transparent !important;
+  }
+
+  /* Keep input and textarea editable across platforms */
+  input,
+  textarea {
+    background: transparent !important;
+    color: hsl(var(--foreground));
+  }
+}
+
+@layer components {
+  .app-page {
+    @apply min-h-screen text-foreground relative;
+    background: var(--gradient-page);
+  }
+
+  .app-content {
+    @apply px-4 pt-8 pb-24;
+  }
+
+  .app-hero {
+    @apply mb-4 rounded-2xl px-5 py-5 border;
+    background: var(--gradient-card);
+    border-color: var(--glass-border);
+    box-shadow: var(--shadow-soft);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .app-hero::after {
+    content: '';
+    position: absolute;
+    right: -32px;
+    top: -28px;
+    width: 150px;
+    height: 150px;
+    border-radius: 9999px;
+    background: radial-gradient(circle, hsl(var(--primary) / 0.24), transparent 70%);
+    pointer-events: none;
+  }
+
+  .app-title {
+    @apply text-[28px] font-black tracking-wide text-foreground block;
+  }
+
+  .app-subtitle {
+    @apply text-sm text-muted-foreground mt-1 block;
+  }
+
+  .ui-card {
+    @apply rounded-2xl border p-4;
+    background: linear-gradient(165deg, hsl(216 33% 18% / 0.86), hsl(218 28% 12% / 0.86));
+    border-color: var(--glass-border);
+    box-shadow: var(--shadow-soft);
+    transition: transform 0.2s ease, border-color 0.2s ease;
+    min-width: 0;
+  }
+
+  .ui-card:active {
+    transform: translateY(1px) scale(0.996);
+    border-color: hsl(var(--primary) / 0.32);
+  }
+
+  .ui-card-strong {
+    @apply rounded-2xl border p-4;
+    background: var(--gradient-card);
+    border-color: hsl(var(--primary) / 0.28);
+    box-shadow: var(--shadow-strong);
+    min-width: 0;
+  }
+
+  .ui-card-sharp {
+    @apply rounded-2xl border p-4;
+    background: hsl(216 32% 15% / 0.96);
+    border-color: hsl(var(--border) / 0.72);
+    box-shadow: none;
+    min-width: 0;
+  }
+
+  .ui-panel-sharp {
+    @apply rounded-xl border p-3;
+    background: hsl(216 30% 16% / 0.96);
+    border-color: hsl(var(--border) / 0.62);
+    box-shadow: none;
+    min-width: 0;
+  }
+
+  .ui-pill {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold;
+    background: hsl(var(--primary) / 0.2);
+    border: 1px solid hsl(var(--primary) / 0.34);
+    color: hsl(var(--foreground));
+  }
+
+  .ui-icon-btn {
+    @apply w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200;
+    background: hsl(var(--foreground) / 0.02);
+    border: 1px solid var(--glass-border);
+  }
+
+  .ui-icon-btn:active {
+    transform: scale(0.96);
+    background: hsl(var(--foreground) / 0.07);
+  }
+
+  .ui-top-action-btn {
+    @apply w-11 h-11 rounded-full flex items-center justify-center transition-all duration-200;
+    background: hsl(var(--foreground) / 0.03);
+    border: 1px solid var(--glass-border);
+  }
+
+  .ui-top-action-btn:active {
+    transform: scale(0.97);
+    background: hsl(var(--foreground) / 0.09);
+  }
+
+  .ui-mini-icon-btn {
+    @apply w-8 h-8 rounded-lg flex items-center justify-center transition-all duration-200;
+    background: hsl(var(--foreground) / 0.03);
+    border: 1px solid hsl(var(--border) / 0.55);
+  }
+
+  .ui-mini-icon-btn:active {
+    transform: scale(0.97);
+    background: hsl(var(--foreground) / 0.09);
+  }
+
+  .ui-btn-primary {
+    @apply rounded-xl h-11 px-4 text-sm font-bold text-white flex items-center justify-center;
+    background: var(--gradient-primary);
+    border: 1px solid hsl(var(--primary) / 0.5);
+    box-shadow: 0 10px 22px hsl(var(--primary) / 0.35);
+    transition: transform 0.16s ease, filter 0.16s ease;
+    min-width: 0;
+  }
+
+  .ui-btn-primary:active {
+    transform: scale(0.98);
+    filter: brightness(1.06);
+  }
+
+  .ui-btn-secondary {
+    @apply rounded-xl h-11 px-4 text-sm font-semibold text-foreground flex items-center justify-center;
+    background: hsl(var(--secondary) / 0.78);
+    border: 1px solid var(--glass-border);
+    transition: transform 0.16s ease, background-color 0.16s ease;
+    min-width: 0;
+  }
+
+  .ui-btn-secondary:active {
+    transform: scale(0.985);
+    background: hsl(var(--foreground) / 0.08);
+  }
+
+  .ui-btn-danger {
+    @apply rounded-xl h-11 px-4 text-sm font-semibold text-white flex items-center justify-center;
+    background: linear-gradient(135deg, hsl(0 77% 54%), hsl(0 67% 41%));
+    border: 1px solid hsl(0 83% 70% / 0.4);
+    transition: transform 0.16s ease;
+    min-width: 0;
+  }
+
+  .ui-btn-danger:active {
+    transform: scale(0.98);
+  }
+
+  .ui-input {
+    @apply rounded-xl px-3 py-2 text-sm text-foreground;
+    background: hsl(var(--secondary) / 0.55);
+    border: 1px solid var(--glass-border);
+    min-height: 2.5rem;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+    line-height: 1.4;
+  }
+
+  .ui-input taro-input-core {
+    width: 100%;
+    max-width: 100%;
+    display: block;
+    box-sizing: border-box;
+  }
+
+  .ui-input .taro-input,
+  .ui-input input {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    line-height: 1.4;
+  }
+
+  .ui-fab {
+    @apply w-14 h-14 rounded-full flex items-center justify-center transition-all duration-200;
+    background: var(--gradient-primary);
+    box-shadow: 0 14px 26px hsl(var(--primary) / 0.46);
+    border: 1px solid hsl(var(--primary) / 0.6);
+  }
+
+  .ui-fab:active {
+    transform: scale(0.95);
+  }
+
+  .ui-section-label {
+    @apply text-[11px] font-bold uppercase tracking-[0.18em];
+    color: hsl(var(--primary));
+  }
+
+  .ui-stat-grid {
+    @apply grid grid-cols-2 gap-2 mt-4;
+  }
+
+  .ui-stat-card {
+    @apply rounded-xl px-3 py-2 border;
+    background: hsl(var(--foreground) / 0.03);
+    border-color: hsl(var(--primary) / 0.2);
+  }
+
+  .ui-stat-value {
+    @apply text-lg font-black text-foreground leading-tight;
+  }
+
+  .ui-stat-label {
+    @apply text-[11px] text-muted-foreground tracking-wide;
+  }
+
+  .ui-modal-panel {
+    width: calc(100vw - 2rem);
+    max-width: 20rem;
+  }
+
+  .ui-row-wrap {
+    @apply flex items-center flex-wrap gap-2;
+    min-width: 0;
+  }
+
+  .ui-actions-wrap {
+    @apply flex items-center justify-end flex-wrap gap-2;
+    min-width: 0;
+  }
+
+  .ui-inline-meta {
+    @apply flex items-center flex-wrap gap-2 text-xs text-muted-foreground;
+    min-width: 0;
+  }
+
+  .ui-muted-panel {
+    @apply rounded-xl border px-3 py-2;
+    background: hsl(var(--foreground) / 0.03);
+    border-color: hsl(var(--primary) / 0.2);
+  }
+
+  .fade-in-up {
+    animation: fadeInUp 0.42s ease-out both;
+  }
+}
+
+@layer utilities {
+  /* Global readability uplift for text-heavy mobile views */
+  .text-xs:not([class*='i-mdi']) {
+    font-size: 0.98rem;
+    line-height: 1.4;
+  }
+
+  .text-sm:not([class*='i-mdi']) {
+    font-size: 1.12rem;
+    line-height: 1.45;
+  }
+
+  .text-base:not([class*='i-mdi']) {
+    font-size: 1.24rem;
+    line-height: 1.52;
+  }
+
+  .text-lg:not([class*='i-mdi']) {
+    font-size: 1.36rem;
+    line-height: 1.56;
+  }
+
+  .text-xl:not([class*='i-mdi']) {
+    font-size: 1.5rem;
+    line-height: 1.58;
+  }
+
+  .bg-gradient-primary {
+    background: var(--gradient-primary);
+  }
+
+  .bg-gradient-card {
+    background: var(--gradient-card);
+  }
+
+  .bg-gradient-page {
+    background: var(--gradient-page);
+  }
+
+  .status-yellow {
+    background-color: hsl(var(--color-yellow));
+  }
+
+  .status-red {
+    background-color: hsl(var(--color-red));
+  }
+
+  .status-green {
+    background-color: hsl(var(--color-green));
+  }
+
+  .text-shadow-lg {
+    text-shadow: 0 4px 8px rgba(0, 0, 0, 0.6);
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

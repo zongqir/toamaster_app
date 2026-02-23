@@ -1,0 +1,6 @@
+👽 Taro v4.1.10
+
+ℹ tailwindcss-patcher 绑定 Tailwind CSS -> /data/wechat/node_modules/.pnpm/tailwindcss@3.4.17_ts-node@10.9.2_@swc+core@1.3.96_@types+node@24.3.1_typescript@5.9.3_/node_modules/tailwindcss (v3.4.17)
+✔ 当前使用 Tailwind CSS 版本为: 3.4.17
+vite v4.5.14 building for production...
+transforming...

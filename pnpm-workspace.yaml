@@ -1,0 +1,5 @@
+onlyBuiltDependencies:
+- "@ast-grep/cli"
+- "weapp-tailwindcss"
+- "@tarojs/binding"
+- "@tarojs/cli"
