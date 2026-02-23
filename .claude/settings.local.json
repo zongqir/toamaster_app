@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd:*)",
+      "Bash(head:*)",
+      "Bash(grep:*)",
+      "Bash(cd /d/code/toamaster_app && npx tsc --noEmit src/pages/import/index.tsx 2>&1)",
+      "Bash(tail:*)",
+      "WebSearch"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "insforge"
+  ]
+}

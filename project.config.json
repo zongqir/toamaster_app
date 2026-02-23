@@ -1,0 +1,45 @@
+{
+    "miniprogramRoot": "dist/",
+    "projectname": "taro-react-starter",
+    "description": "taro-react-starter",
+    "appid": "wx5151c9a810b765b7",
+    "setting": {
+        "urlCheck": true,
+        "es6": false,
+        "enhance": false,
+        "compileHotReLoad": false,
+        "postcss": false,
+        "minified": false,
+        "babelSetting": {
+            "ignore": [],
+            "disablePlugins": [],
+            "outputPath": ""
+        },
+        "compileWorklet": false,
+        "uglifyFileName": false,
+        "uploadWithSourceMap": true,
+        "packNpmManually": false,
+        "packNpmRelationList": [],
+        "minifyWXSS": true,
+        "minifyWXML": true,
+        "localPlugins": false,
+        "condition": false,
+        "swc": false,
+        "disableSWC": true,
+        "disableUseStrict": false,
+        "useCompilerPlugins": false
+    },
+    "compileType": "miniprogram",
+    "libVersion": "3.14.2",
+    "srcMiniprogramRoot": "dist/",
+    "packOptions": {
+        "ignore": [],
+        "include": []
+    },
+    "condition": {},
+    "editorSetting": {
+        "tabIndent": "insertSpaces",
+        "tabSize": 4
+    },
+    "simulatorPluginLibVersion": {}
+}
