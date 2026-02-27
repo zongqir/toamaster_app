@@ -417,12 +417,14 @@ export default function TimerPage() {
             </View>
 
             <View
-              className={`relative flex items-center justify-center ${isCompact ? 'w-50 h-50' : 'w-64 h-64'}`}
+              className={`relative flex items-center justify-center ${isCompact ? 'w-44 h-44' : 'w-56 h-56'}`}
               onClick={handleDoubleTapTimer}>
               {/* 进度环效果 */}
-              <View className="absolute inset-0 rounded-full border-[6px] border-white/10" />
+              <View
+                className={`${isCompact ? 'border-[5px]' : 'border-[6px]'} absolute inset-0 rounded-full border-white/10`}
+              />
               <Text
-                className={`${isCompact ? 'text-5xl' : 'text-6xl'} font-mono font-bold tracking-tight text-white ${status === 'timeout' ? 'scale-110' : ''} transition-transform`}>
+                className={`${isCompact ? 'text-4xl' : 'text-5xl'} font-mono font-bold tracking-tight text-white ${status === 'timeout' ? 'scale-110' : ''} transition-transform`}>
                 {formatTime(remaining)}
               </Text>
             </View>
@@ -634,27 +636,31 @@ export default function TimerPage() {
         <View className={`${isCompact ? 'mb-2 gap-2' : 'mb-3 gap-3'} flex items-center justify-center`}>
           <View className={`flex flex-col ${isCompact ? 'gap-1.5' : 'gap-2'}`}>
             <View
-              className={`${isCompact ? 'w-[74px] h-9 rounded-lg' : 'w-20 h-10 rounded-xl'} bg-black/25 border border-white/40 flex items-center justify-center text-white active:border-white/60`}
+              className={`${isCompact ? 'w-[72px] h-9 rounded-lg' : 'w-[84px] h-10 rounded-xl'} bg-black/25 border border-white/40 flex items-center justify-center text-white active:border-white/60`}
               onClick={() => adjustTime(-30)}>
-              <Text className={isCompact ? 'text-[10px] font-bold leading-none' : 'text-[11px] font-bold'}>
-                回退 30s
+              <Text className={isCompact ? 'text-[13px] font-bold leading-none' : 'text-sm font-bold leading-none'}>
+                -30
               </Text>
             </View>
             <View
-              className={`${isCompact ? 'w-[74px] h-9 rounded-lg' : 'w-20 h-10 rounded-xl'} bg-black/25 border border-white/40 flex items-center justify-center text-white active:border-white/60`}
+              className={`${isCompact ? 'w-[72px] h-9 rounded-lg' : 'w-[84px] h-10 rounded-xl'} bg-black/25 border border-white/40 flex items-center justify-center text-white active:border-white/60`}
               onClick={() => adjustTime(-10)}>
-              <Text className={isCompact ? 'text-[10px] font-bold leading-none' : 'text-[11px] font-bold'}>
-                回退 10s
+              <Text className={isCompact ? 'text-[13px] font-bold leading-none' : 'text-sm font-bold leading-none'}>
+                -10
               </Text>
             </View>
           </View>
 
           <View
-            className={`${isCompact ? 'w-[76px] h-[76px]' : 'w-[92px] h-[92px]'} rounded-full bg-gradient-primary border border-cyan-300/35 flex flex-col items-center justify-center shadow-xl transition-all active:scale-95`}
+            className={`${isCompact ? 'w-[72px] h-[72px]' : 'w-[84px] h-[84px]'} rounded-full bg-gradient-primary border border-cyan-300/35 flex flex-col items-center justify-center shadow-xl transition-all active:scale-95`}
             onClick={isRunning ? pause : start}
             onLongPress={handleLongPressReset}>
             <Text
-              className={isCompact ? 'text-base font-bold text-white leading-none' : 'text-lg font-bold text-white'}>
+              className={
+                isCompact
+                  ? 'text-[15px] font-bold text-white leading-none'
+                  : 'text-base font-bold text-white leading-none'
+              }>
               {isRunning ? '暂停' : '开始'}
             </Text>
             {isRunning && !isCompact && <Text className="text-[10px] text-white/70 mt-0.5">长按重置</Text>}
@@ -662,17 +668,17 @@ export default function TimerPage() {
 
           <View className={`flex flex-col ${isCompact ? 'gap-1.5' : 'gap-2'}`}>
             <View
-              className={`${isCompact ? 'w-[74px] h-9 rounded-lg' : 'w-20 h-10 rounded-xl'} bg-black/25 border border-white/40 flex items-center justify-center text-white active:border-white/60`}
+              className={`${isCompact ? 'w-[72px] h-9 rounded-lg' : 'w-[84px] h-10 rounded-xl'} bg-black/25 border border-white/40 flex items-center justify-center text-white active:border-white/60`}
               onClick={() => adjustTime(10)}>
-              <Text className={isCompact ? 'text-[10px] font-bold leading-none' : 'text-[11px] font-bold'}>
-                补加 10s
+              <Text className={isCompact ? 'text-[13px] font-bold leading-none' : 'text-sm font-bold leading-none'}>
+                +10
               </Text>
             </View>
             <View
-              className={`${isCompact ? 'w-[74px] h-9 rounded-lg' : 'w-20 h-10 rounded-xl'} bg-black/25 border border-white/40 flex items-center justify-center text-white active:border-white/60`}
+              className={`${isCompact ? 'w-[72px] h-9 rounded-lg' : 'w-[84px] h-10 rounded-xl'} bg-black/25 border border-white/40 flex items-center justify-center text-white active:border-white/60`}
               onClick={() => adjustTime(30)}>
-              <Text className={isCompact ? 'text-[10px] font-bold leading-none' : 'text-[11px] font-bold'}>
-                补加 30s
+              <Text className={isCompact ? 'text-[13px] font-bold leading-none' : 'text-sm font-bold leading-none'}>
+                +30
               </Text>
             </View>
           </View>
