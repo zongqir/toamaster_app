@@ -1,0 +1,49 @@
+name: Supabase Keepalive
+
+on:
+  schedule:
+    # Every 20 minutes (UTC)
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: true
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+    steps:
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${SUPABASE_URL}"
+          test -n "${SUPABASE_ANON_KEY}"
+
+      - name: Wake Edge Function
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_URL="${SUPABASE_URL%/}"
+          curl -sS --fail-with-body -m 30 \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            "${BASE_URL}/functions/v1/test-connection"
+
+      - name: Wake PostgREST
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_URL="${SUPABASE_URL%/}"
+          curl -sS --fail-with-body -m 30 \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            "${BASE_URL}/rest/v1/meetings?select=id&limit=1"
