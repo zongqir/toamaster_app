@@ -9,7 +9,7 @@
         "enhance": false,
         "compileHotReLoad": false,
         "postcss": false,
-        "minified": false,
+        "minified": true,
         "babelSetting": {
             "ignore": [],
             "disablePlugins": [],
@@ -17,7 +17,7 @@
         },
         "compileWorklet": false,
         "uglifyFileName": false,
-        "uploadWithSourceMap": true,
+        "uploadWithSourceMap": false,
         "packNpmManually": false,
         "packNpmRelationList": [],
         "minifyWXSS": true,
