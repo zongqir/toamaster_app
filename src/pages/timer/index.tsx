@@ -172,10 +172,10 @@ export default function TimerPage() {
       plannedDuration: duration * 60,
       actualDuration: actualDurationInSeconds
     }
-    updateCurrentItem(updatedItem)
+    const normalizedItem = updateCurrentItem(updatedItem)
 
     // 更新 session
-    const updatedItems = currentSession.items.map((item) => (item.id === updatedItem.id ? updatedItem : item))
+    const updatedItems = currentSession.items.map((item) => (item.id === normalizedItem.id ? normalizedItem : item))
     const updatedSession = {...currentSession, items: updatedItems}
     setCurrentSession(updatedSession)
     StorageService.saveSession(updatedSession)
@@ -318,10 +318,10 @@ export default function TimerPage() {
       plannedDuration: newDuration
     }
 
-    updateCurrentItem(updatedItem)
+    const normalizedItem = updateCurrentItem(updatedItem)
 
     // 更新session
-    const updatedItems = currentSession.items.map((item) => (item.id === updatedItem.id ? updatedItem : item))
+    const updatedItems = currentSession.items.map((item) => (item.id === normalizedItem.id ? normalizedItem : item))
     const updatedSession = {...currentSession, items: updatedItems}
     setCurrentSession(updatedSession)
 

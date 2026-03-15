@@ -26,6 +26,9 @@ export function useMeetingTimer(
     const inProgressIndex = meetingItems.findIndex((item) => item.actualStartTime && !item.actualEndTime)
     if (inProgressIndex >= 0) return inProgressIndex
 
+    const pausedIndex = meetingItems.findIndex((item) => item.actualDuration !== undefined && !item.actualEndTime)
+    if (pausedIndex >= 0) return pausedIndex
+
     const firstPendingIndex = meetingItems.findIndex(
       (item) => item.actualDuration === undefined && item.actualEndTime === undefined
     )
@@ -33,6 +36,8 @@ export function useMeetingTimer(
 
     return meetingItems.length - 1
   }, [])
+
+  const activeItemId = updatedItems[currentIndex]?.id
 
   // Sync external item list changes (add/remove/restore)
   useEffect(() => {
@@ -46,6 +51,10 @@ export function useMeetingTimer(
       return
     }
 
+    if (isRunning && activeItemId && !items.some((item) => item.id === activeItemId)) {
+      setIsRunning(false)
+    }
+
     setCurrentIndex((prev) => {
       // First entry to timer page: resume unfinished/in-progress item.
       if (!hasInitializedIndexRef.current) {
@@ -56,7 +65,13 @@ export function useMeetingTimer(
       // Keep index valid when list length changes.
       return Math.min(prev, items.length - 1)
     })
-  }, [items, getResumeIndex])
+  }, [items, getResumeIndex, activeItemId, isRunning])
+
+  const getLiveElapsed = useCallback(() => {
+    if (!updatedItems[currentIndex]) return elapsed
+    if (!isRunning) return elapsed
+    return baseElapsedRef.current + Math.floor((Date.now() - runStartRef.current) / 1000)
+  }, [currentIndex, elapsed, isRunning, updatedItems])
 
   // Restore elapsed time for current item.
   useEffect(() => {
@@ -67,20 +82,23 @@ export function useMeetingTimer(
       return
     }
 
-    if (item.actualDuration !== undefined) {
-      setElapsed(item.actualDuration)
-      baseElapsedRef.current = item.actualDuration
-    } else if (item.actualStartTime && !item.actualEndTime) {
-      const elapsedTime = Math.floor((Date.now() - item.actualStartTime) / 1000)
+    if (item.actualStartTime && !item.actualEndTime) {
+      const elapsedTime = (item.actualDuration || 0) + Math.floor((Date.now() - item.actualStartTime) / 1000)
       setElapsed(elapsedTime)
       baseElapsedRef.current = elapsedTime
+      if (isRunning) {
+        runStartRef.current = Date.now()
+      }
+    } else if (item.actualDuration !== undefined) {
+      setElapsed(item.actualDuration)
+      baseElapsedRef.current = item.actualDuration
     } else {
       setElapsed(0)
       baseElapsedRef.current = 0
     }
 
     lastStatusRef.current = 'green'
-  }, [currentIndex, updatedItems])
+  }, [currentIndex, updatedItems, isRunning])
 
   const currentItem = updatedItems[currentIndex]
   const currentRule = rules[currentItem?.ruleId || 'short']
@@ -122,49 +140,120 @@ export function useMeetingTimer(
 
   const updateCurrentItem = useCallback(
     (item: MeetingItem) => {
+      const now = Date.now()
+      const liveElapsed = item.actualDuration ?? getLiveElapsed()
+      const hadTiming =
+        updatedItems[currentIndex]?.actualDuration !== undefined ||
+        updatedItems[currentIndex]?.actualStartTime !== undefined ||
+        item.actualDuration !== undefined ||
+        liveElapsed > 0 ||
+        isRunning
+      const normalizedItem: MeetingItem = {
+        ...item,
+        actualDuration: hadTiming ? liveElapsed : undefined,
+        actualStartTime: isRunning ? now : undefined,
+        actualEndTime: item.actualEndTime
+      }
+
       const newItems = [...updatedItems]
-      newItems[currentIndex] = item
+      newItems[currentIndex] = normalizedItem
       setUpdatedItems(newItems)
-      setElapsed(0)
+
+      setElapsed(liveElapsed)
+      baseElapsedRef.current = liveElapsed
+
+      if (isRunning) {
+        runStartRef.current = now
+      }
+
+      return normalizedItem
     },
-    [currentIndex, updatedItems]
+    [currentIndex, getLiveElapsed, isRunning, updatedItems]
   )
 
   const start = useCallback(() => {
     if (isRunning || !updatedItems[currentIndex]) return
 
-    baseElapsedRef.current = elapsed
-    runStartRef.current = Date.now()
-    setIsRunning(true)
-
-    if (!updatedItems[currentIndex].actualStartTime) {
-      const newItems = [...updatedItems]
-      newItems[currentIndex].actualStartTime = Date.now()
-      setUpdatedItems(newItems)
-      onSessionCheckpoint?.(newItems)
+    const now = Date.now()
+    const baseElapsed = updatedItems[currentIndex].actualDuration ?? elapsed
+    const newItems = [...updatedItems]
+    newItems[currentIndex] = {
+      ...newItems[currentIndex],
+      actualDuration: baseElapsed,
+      actualStartTime: now,
+      actualEndTime: undefined
     }
+
+    setUpdatedItems(newItems)
+    setElapsed(baseElapsed)
+    baseElapsedRef.current = baseElapsed
+    runStartRef.current = now
+    setIsRunning(true)
+    onSessionCheckpoint?.(newItems)
   }, [isRunning, currentIndex, updatedItems, elapsed, onSessionCheckpoint])
 
   const pause = useCallback(() => {
+    if (!updatedItems[currentIndex]) {
+      setIsRunning(false)
+      return
+    }
+
+    const now = Date.now()
+    const liveElapsed = getLiveElapsed()
+    const newItems = [...updatedItems]
+    newItems[currentIndex] = {
+      ...newItems[currentIndex],
+      actualDuration: liveElapsed,
+      actualStartTime: undefined,
+      actualEndTime: undefined
+    }
+
+    setUpdatedItems(newItems)
+    setElapsed(liveElapsed)
+    baseElapsedRef.current = liveElapsed
+    runStartRef.current = now
     setIsRunning(false)
-  }, [])
+    onSessionCheckpoint?.(newItems)
+  }, [currentIndex, getLiveElapsed, onSessionCheckpoint, updatedItems])
 
   const reset = useCallback(() => {
+    if (!updatedItems[currentIndex]) {
+      setElapsed(0)
+      setIsRunning(false)
+      return
+    }
+
+    const newItems = [...updatedItems]
+    newItems[currentIndex] = {
+      ...newItems[currentIndex],
+      actualDuration: undefined,
+      actualStartTime: undefined,
+      actualEndTime: undefined
+    }
+
+    setUpdatedItems(newItems)
     setElapsed(0)
+    baseElapsedRef.current = 0
+    runStartRef.current = 0
     setIsRunning(false)
-  }, [])
+    onSessionCheckpoint?.(newItems)
+  }, [currentIndex, onSessionCheckpoint, updatedItems])
 
   const next = useCallback(() => {
     if (!updatedItems[currentIndex]) return
 
-    if (isRunning) {
-      setIsRunning(false)
+    const liveElapsed = getLiveElapsed()
+    const newItems = [...updatedItems]
+    newItems[currentIndex] = {
+      ...newItems[currentIndex],
+      actualDuration: liveElapsed,
+      actualEndTime: Date.now()
     }
 
-    const newItems = [...updatedItems]
-    newItems[currentIndex].actualEndTime = Date.now()
-    newItems[currentIndex].actualDuration = elapsed
     setUpdatedItems(newItems)
+    setElapsed(liveElapsed)
+    baseElapsedRef.current = liveElapsed
+    setIsRunning(false)
     onSessionCheckpoint?.(newItems)
 
     if (currentIndex < updatedItems.length - 1) {
@@ -172,46 +261,80 @@ export function useMeetingTimer(
     } else {
       onSessionComplete(newItems)
     }
-  }, [currentIndex, updatedItems, elapsed, onSessionComplete, isRunning, onSessionCheckpoint])
+  }, [currentIndex, getLiveElapsed, updatedItems, onSessionComplete, onSessionCheckpoint])
 
   const prev = useCallback(() => {
     if (currentIndex <= 0) return
 
-    if (isRunning && updatedItems[currentIndex]) {
-      setIsRunning(false)
+    if (updatedItems[currentIndex]) {
+      const liveElapsed = getLiveElapsed()
       const newItems = [...updatedItems]
-      newItems[currentIndex].actualEndTime = Date.now()
-      newItems[currentIndex].actualDuration = elapsed
+      newItems[currentIndex] = {
+        ...newItems[currentIndex],
+        actualDuration: liveElapsed,
+        actualEndTime: Date.now()
+      }
+
       setUpdatedItems(newItems)
+      setElapsed(liveElapsed)
+      baseElapsedRef.current = liveElapsed
+      setIsRunning(false)
       onSessionCheckpoint?.(newItems)
     }
 
     setCurrentIndex(currentIndex - 1)
-  }, [currentIndex, isRunning, updatedItems, elapsed, onSessionCheckpoint])
+  }, [currentIndex, getLiveElapsed, updatedItems, onSessionCheckpoint])
 
-  const adjustTime = useCallback((seconds: number) => {
-    setElapsed((prev) => Math.max(0, prev + seconds))
-  }, [])
+  const adjustTime = useCallback(
+    (seconds: number) => {
+      if (!updatedItems[currentIndex]) return
+
+      const now = Date.now()
+      const nextElapsed = Math.max(0, getLiveElapsed() + seconds)
+      const newItems = [...updatedItems]
+      newItems[currentIndex] = {
+        ...newItems[currentIndex],
+        actualDuration: nextElapsed,
+        actualStartTime: isRunning ? now : undefined,
+        actualEndTime: undefined
+      }
+
+      setUpdatedItems(newItems)
+      setElapsed(nextElapsed)
+      baseElapsedRef.current = nextElapsed
+
+      if (isRunning) {
+        runStartRef.current = now
+      }
+
+      onSessionCheckpoint?.(newItems)
+    },
+    [currentIndex, getLiveElapsed, isRunning, onSessionCheckpoint, updatedItems]
+  )
 
   const jumpTo = useCallback(
     (index: number) => {
       if (index < 0 || index >= items.length) return
 
-      if (isRunning) {
-        setIsRunning(false)
-      }
-
       if (currentIndex < items.length && updatedItems[currentIndex]) {
+        const liveElapsed = getLiveElapsed()
         const newItems = [...updatedItems]
-        newItems[currentIndex].actualEndTime = Date.now()
-        newItems[currentIndex].actualDuration = elapsed
+        newItems[currentIndex] = {
+          ...newItems[currentIndex],
+          actualDuration: liveElapsed,
+          actualEndTime: Date.now()
+        }
+
         setUpdatedItems(newItems)
+        setElapsed(liveElapsed)
+        baseElapsedRef.current = liveElapsed
         onSessionCheckpoint?.(newItems)
       }
 
+      setIsRunning(false)
       setCurrentIndex(index)
     },
-    [currentIndex, updatedItems, elapsed, items.length, isRunning, onSessionCheckpoint]
+    [currentIndex, getLiveElapsed, updatedItems, items.length, onSessionCheckpoint]
   )
 
   useEffect(() => {
