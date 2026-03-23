@@ -56,6 +56,7 @@ export type MeetingSession = {
   metadata: MeetingMetadata
   items: MeetingItem[]
   createdAt: number
+  agendaVersion?: number
   isCompleted?: boolean
 }
 

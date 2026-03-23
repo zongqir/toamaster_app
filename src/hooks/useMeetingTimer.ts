@@ -312,6 +312,37 @@ export function useMeetingTimer(
     [currentIndex, getLiveElapsed, isRunning, onSessionCheckpoint, updatedItems]
   )
 
+  const flushCheckpoint = useCallback(
+    (options?: {skipCheckpoint?: boolean}) => {
+      if (!updatedItems[currentIndex]) return null
+
+      const now = Date.now()
+      const liveElapsed = getLiveElapsed()
+      const newItems = [...updatedItems]
+      newItems[currentIndex] = {
+        ...newItems[currentIndex],
+        actualDuration: liveElapsed,
+        actualStartTime: isRunning ? now : undefined,
+        actualEndTime: undefined
+      }
+
+      setUpdatedItems(newItems)
+      setElapsed(liveElapsed)
+      baseElapsedRef.current = liveElapsed
+
+      if (isRunning) {
+        runStartRef.current = now
+      }
+
+      if (!options?.skipCheckpoint) {
+        onSessionCheckpoint?.(newItems)
+      }
+
+      return newItems
+    },
+    [currentIndex, getLiveElapsed, isRunning, onSessionCheckpoint, updatedItems]
+  )
+
   const jumpTo = useCallback(
     (index: number) => {
       if (index < 0 || index >= items.length) return
@@ -366,6 +397,7 @@ export function useMeetingTimer(
     next,
     prev,
     adjustTime,
+    flushCheckpoint,
     reset,
     totalItems: items.length,
     updateCurrentItem,

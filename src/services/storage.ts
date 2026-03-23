@@ -42,24 +42,55 @@ const DEFAULT_SETTINGS: AppSettings = {
 }
 
 type SyncResult = {success: boolean; error?: string}
+export type CloudSyncStatus = 'idle' | 'syncing' | 'failed'
+export type SessionCloudSyncState = {
+  status: CloudSyncStatus
+  error?: string
+  updatedAt: number
+}
 
 // 按会议维度做串行同步，避免旧快照晚到覆盖新状态（例如 isCompleted 被回滚）。
 const pendingCloudSync = new Map<string, MeetingSession>()
 const cloudWorkers = new Map<string, Promise<void>>()
 const lastCloudSyncResult = new Map<string, SyncResult>()
+const cloudSyncState = new Map<string, SessionCloudSyncState>()
+const cloudSyncListeners = new Set<() => void>()
+
+const emitCloudSyncStateChange = () => {
+  cloudSyncListeners.forEach((listener) => listener())
+}
+
+const setCloudSyncState = (sessionId: string, state: SessionCloudSyncState) => {
+  cloudSyncState.set(sessionId, state)
+  emitCloudSyncStateChange()
+}
 
 const saveSessionToCloud = async (session: MeetingSession): Promise<SyncResult> => {
   try {
     // 动态导入避免循环依赖
     const {DatabaseService} = await import('../db/database')
-    const result = await DatabaseService.saveMeeting(session)
-    if (result.success) {
-      console.log('会议已同步到云端:', session.id)
+
+    // Agenda V2 会话优先走 metadata-only，避免旧 saveMeeting 的整表覆盖路径。
+    if (typeof session.agendaVersion === 'number' && session.agendaVersion > 0) {
+      const metadataResult = await DatabaseService.updateMeetingMetadata(session.id, session.metadata, {
+        isCompleted: session.isCompleted
+      })
+      if (metadataResult.success) {
+        console.log('会议基础信息已同步到云端:', session.id)
+        return {success: true}
+      }
+
+      console.warn('metadata-only 同步失败，尝试回退 saveMeeting:', metadataResult.error)
+    }
+
+    const fallbackResult = await DatabaseService.saveMeeting(session)
+    if (fallbackResult.success) {
+      console.log('会议已通过回退路径同步到云端:', session.id)
       return {success: true}
     }
 
-    console.error('同步到云端失败:', result.error)
-    return {success: false, error: result.error}
+    console.error('同步到云端失败:', fallbackResult.error)
+    return {success: false, error: fallbackResult.error}
   } catch (error) {
     console.error('同步到云端异常:', error)
     return {success: false, error: error instanceof Error ? error.message : '未知错误'}
@@ -76,8 +107,22 @@ const runCloudWorker = (sessionId: string): Promise<void> => {
       if (!nextSession) break
 
       pendingCloudSync.delete(sessionId)
+      setCloudSyncState(sessionId, {status: 'syncing', updatedAt: Date.now()})
       const result = await saveSessionToCloud(nextSession)
       lastCloudSyncResult.set(sessionId, result)
+
+      if (result.success) {
+        setCloudSyncState(sessionId, {
+          status: pendingCloudSync.has(sessionId) ? 'syncing' : 'idle',
+          updatedAt: Date.now()
+        })
+      } else {
+        setCloudSyncState(sessionId, {
+          status: 'failed',
+          error: result.error,
+          updatedAt: Date.now()
+        })
+      }
     }
   })().finally(() => {
     cloudWorkers.delete(sessionId)
@@ -118,8 +163,9 @@ export const StorageService = {
     }
     Taro.setStorageSync(SESSIONS_KEY, sessions)
 
-    // 异步同步到云端（不阻塞本地保存）
-    if (options?.syncToCloud !== false) {
+    // 默认仅本地保存，只有显式 syncToCloud: true 才走旧的整份云同步。
+    if (options?.syncToCloud === true) {
+      setCloudSyncState(session.id, {status: 'syncing', updatedAt: Date.now()})
       this.enqueueCloudSync(session)
     }
   },
@@ -147,9 +193,28 @@ export const StorageService = {
     return this.waitForCloudSync(session.id)
   },
 
+  getCloudSyncState(sessionId?: string): SessionCloudSyncState {
+    if (!sessionId) {
+      return {status: 'idle', updatedAt: Date.now()}
+    }
+
+    return cloudSyncState.get(sessionId) || {status: 'idle', updatedAt: 0}
+  },
+
+  subscribeCloudSyncState(listener: () => void): () => void {
+    cloudSyncListeners.add(listener)
+    return () => {
+      cloudSyncListeners.delete(listener)
+    }
+  },
+
   deleteSession(id: string) {
     const sessions = this.getSessions()
     const filtered = sessions.filter((s) => s.id !== id)
     Taro.setStorageSync(SESSIONS_KEY, filtered)
+    pendingCloudSync.delete(id)
+    lastCloudSyncResult.delete(id)
+    cloudSyncState.delete(id)
+    emitCloudSyncStateChange()
   }
 }

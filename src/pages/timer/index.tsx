@@ -1,10 +1,14 @@
 import {Button, Input, Picker, ScrollView, Text, View} from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import {useCallback, useMemo, useRef, useState} from 'react'
+import {useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react'
+import {supabase} from '../../client/supabase'
+import {AgendaV2DatabaseService} from '../../db/agendaV2Database'
 import {DatabaseService} from '../../db/database'
 import {useMeetingTimer} from '../../hooks/useMeetingTimer'
+import {AgendaOpsSyncQueueService} from '../../services/agendaOpsSyncQueue'
 import {StorageService} from '../../services/storage'
 import {useMeetingStore} from '../../store/meetingStore'
+import type {AgendaOpInput} from '../../types/agendaV2'
 import type {MeetingItem, MeetingSession} from '../../types/meeting'
 import {generateId} from '../../utils/id'
 import {safeSwitchTab} from '../../utils/safeNavigation'
@@ -20,16 +24,60 @@ export default function TimerPage() {
   const [editSpeaker, setEditSpeaker] = useState('')
   const [editDuration, setEditDuration] = useState('')
   const [editActualDuration, setEditActualDuration] = useState('')
+  const [agendaOpsSyncStatus, setAgendaOpsSyncStatus] = useState<'idle' | 'syncing' | 'failed'>('idle')
+  const [agendaOpsSyncError, setAgendaOpsSyncError] = useState<string>('')
 
   // 时间快速编辑相关状态
   const [showTimeEditDialog, setShowTimeEditDialog] = useState(false)
   const [selectedMinutes, setSelectedMinutes] = useState(0)
   const [selectedSeconds, setSelectedSeconds] = useState(0)
   const lastTapTimeRef = useRef(0)
+  const agendaOpsSyncQueueRef = useRef(Promise.resolve())
+  const agendaOpsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const realtimeSyncBusyRef = useRef(false)
+  const syncAgendaOpsToCloudRef = useRef<(sessionSnapshot: MeetingSession, ops: AgendaOpInput[]) => Promise<void>>(
+    async () => {}
+  )
 
   const activeItems = useMemo(() => {
     return currentSession?.items.filter((i) => !i.disabled) || []
   }, [currentSession])
+  const sessionId = currentSession?.id
+  const cloudSyncState = useSyncExternalStore(
+    StorageService.subscribeCloudSyncState,
+    () => StorageService.getCloudSyncState(sessionId),
+    () => ({status: 'idle' as const, updatedAt: 0})
+  )
+  const cloudSyncText = useMemo(() => {
+    if (agendaOpsSyncStatus === 'syncing') {
+      return '议程增量同步中...'
+    }
+    if (agendaOpsSyncStatus === 'failed') {
+      return `议程增量同步失败${agendaOpsSyncError ? `：${agendaOpsSyncError}` : ''}`
+    }
+
+    switch (cloudSyncState.status) {
+      case 'syncing':
+        return '本地已保存，云端同步中...'
+      case 'failed':
+        return `本地已保存，云端同步失败${cloudSyncState.error ? `：${cloudSyncState.error}` : ''}`
+      default:
+        return '已保存（本地 + 云端）'
+    }
+  }, [agendaOpsSyncError, agendaOpsSyncStatus, cloudSyncState.error, cloudSyncState.status])
+  const cloudSyncClassName = useMemo(() => {
+    if (agendaOpsSyncStatus === 'failed') return 'text-red-200'
+    if (agendaOpsSyncStatus === 'syncing') return 'text-amber-100'
+
+    switch (cloudSyncState.status) {
+      case 'failed':
+        return 'text-red-200'
+      case 'syncing':
+        return 'text-amber-100'
+      default:
+        return 'text-emerald-100'
+    }
+  }, [agendaOpsSyncStatus, cloudSyncState.status])
 
   const mergeTimedItems = useCallback(
     (timedItems: MeetingItem[]): MeetingSession | null => {
@@ -48,19 +96,75 @@ export default function TimerPage() {
     [currentSession]
   )
 
+  const buildTimerCheckpointOps = useCallback((prevItems: MeetingItem[], nextItems: MeetingItem[]): AgendaOpInput[] => {
+    const prevMap = new Map(prevItems.map((item) => [item.id, item]))
+    const ops: AgendaOpInput[] = []
+
+    nextItems.forEach((item) => {
+      const prevItem = prevMap.get(item.id)
+      if (!prevItem) return
+
+      const prevActualDuration = prevItem.actualDuration ?? null
+      const prevActualStartTime = prevItem.actualStartTime ?? null
+      const prevActualEndTime = prevItem.actualEndTime ?? null
+
+      const nextActualDuration = item.actualDuration ?? null
+      const nextActualStartTime = item.actualStartTime ?? null
+      const nextActualEndTime = item.actualEndTime ?? null
+
+      if (
+        prevActualDuration === nextActualDuration &&
+        prevActualStartTime === nextActualStartTime &&
+        prevActualEndTime === nextActualEndTime
+      ) {
+        return
+      }
+
+      ops.push({
+        opId: generateId('op'),
+        type: 'timer_checkpoint',
+        itemKey: item.id,
+        payload: {
+          patch: {
+            actualDuration: nextActualDuration,
+            actualStartTime: nextActualStartTime,
+            actualEndTime: nextActualEndTime
+          }
+        }
+      })
+    })
+
+    return ops
+  }, [])
+
   const handleTimerCheckpoint = useCallback(
     (checkpointItems: MeetingItem[]) => {
-      const checkpointSession = mergeTimedItems(checkpointItems)
-      if (!checkpointSession) return
+      const latestSession = useMeetingStore.getState().currentSession || currentSession
+      if (!latestSession) return
 
+      const mergedItems = latestSession.items.map((item) => {
+        const updated = checkpointItems.find((timedItem) => timedItem.id === item.id)
+        return updated || item
+      })
+
+      const checkpointSession: MeetingSession = {
+        ...latestSession,
+        items: mergedItems
+      }
       setCurrentSession(checkpointSession)
-      StorageService.saveSession(checkpointSession)
+      StorageService.saveSession(checkpointSession, {syncToCloud: false})
+
+      const ops = buildTimerCheckpointOps(latestSession.items, mergedItems)
+      if (ops.length > 0) {
+        void syncAgendaOpsToCloudRef.current(checkpointSession, ops)
+      }
     },
-    [mergeTimedItems, setCurrentSession]
+    [buildTimerCheckpointOps, currentSession, setCurrentSession]
   )
 
   const handleComplete = async (finalItems: MeetingItem[]) => {
     if (!currentSession) return
+    await agendaOpsSyncQueueRef.current
 
     // 合并回原始列表（包括 disabled 的）
     const allItems = currentSession.items.map((item) => {
@@ -75,17 +179,16 @@ export default function TimerPage() {
     }
 
     setCurrentSession(updatedSession)
-    StorageService.saveSession(updatedSession)
+    StorageService.saveSession(updatedSession, {syncToCloud: false})
     setIsCompleted(true)
 
-    Taro.showLoading({title: '正在保存...'})
-    const syncResult = await StorageService.waitForCloudSync(updatedSession.id)
-    Taro.hideLoading()
-
-    if (!syncResult.success) {
+    const metadataResult = await DatabaseService.updateMeetingMetadata(updatedSession.id, updatedSession.metadata, {
+      isCompleted: true
+    })
+    if (!metadataResult.success) {
       Taro.showModal({
         title: '云端保存失败',
-        content: `会议已保存到本地。云端同步失败：${syncResult.error || '未知错误'}。请重试网络后重新完成会议。`,
+        content: `会议已保存到本地。状态同步失败：${metadataResult.error || '未知错误'}。`,
         showCancel: false
       })
       return
@@ -125,10 +228,306 @@ export default function TimerPage() {
     prev,
     adjustTime,
     totalItems,
-    updateCurrentItem,
+    flushCheckpoint,
     reset,
     jumpTo
   } = useMeetingTimer(activeItems, settings.rules, handleComplete, playBeepSound, handleTimerCheckpoint)
+
+  const commitAgendaMutation = useCallback(
+    (mutateItems: (items: MeetingItem[]) => MeetingItem[]) => {
+      const latestSession = useMeetingStore.getState().currentSession || currentSession
+      if (!latestSession) return null
+
+      const checkpointItems = flushCheckpoint({skipCheckpoint: true})
+      const checkpointSession = checkpointItems ? mergeTimedItems(checkpointItems) : latestSession
+      if (!checkpointSession) return null
+
+      const updatedSession: MeetingSession = {
+        ...checkpointSession,
+        items: mutateItems(checkpointSession.items)
+      }
+
+      setCurrentSession(updatedSession)
+      StorageService.saveSession(updatedSession, {syncToCloud: false})
+      return updatedSession
+    },
+    [currentSession, flushCheckpoint, mergeTimedItems, setCurrentSession]
+  )
+
+  const buildOrderOps = useCallback((items: MeetingItem[], includeItemIds?: Set<string>): AgendaOpInput[] => {
+    return items
+      .map((item, index) => ({item, index}))
+      .filter(({item}) => (includeItemIds ? includeItemIds.has(item.id) : true))
+      .map(({item, index}) => ({
+        opId: generateId('op'),
+        type: 'move_item' as const,
+        itemKey: item.id,
+        payload: {
+          parentItemKey: null,
+          orderIndex: index,
+          depth: 1
+        }
+      }))
+  }, [])
+
+  const isAgendaVersionConflict = useCallback((errorText?: string, code?: string) => {
+    if (code === 'VERSION_CONFLICT' || code === 'ROW_VERSION_CONFLICT') return true
+    if (!errorText) return false
+    return errorText.includes('VERSION_CONFLICT') || errorText.includes('ROW_VERSION_CONFLICT')
+  }, [])
+
+  const refreshSessionFromCloud = useCallback(
+    async (meetingId: string): Promise<boolean> => {
+      const cloudSession = await DatabaseService.getMeeting(meetingId)
+      if (!cloudSession) {
+        Taro.showToast({title: '获取云端最新议程失败', icon: 'none'})
+        return false
+      }
+
+      setCurrentSession(cloudSession)
+      StorageService.saveSession(cloudSession, {syncToCloud: false})
+      return true
+    },
+    [setCurrentSession]
+  )
+
+  const drainAgendaOpsQueue = useCallback(
+    async (meetingId: string) => {
+      agendaOpsSyncQueueRef.current = agendaOpsSyncQueueRef.current
+        .then(async () => {
+          if (agendaOpsRetryTimerRef.current) {
+            clearTimeout(agendaOpsRetryTimerRef.current)
+            agendaOpsRetryTimerRef.current = null
+          }
+
+          const readyBatches = AgendaOpsSyncQueueService.listReadyBatches(meetingId)
+          if (readyBatches.length === 0) {
+            setAgendaOpsSyncStatus(AgendaOpsSyncQueueService.hasPending(meetingId) ? 'syncing' : 'idle')
+            return
+          }
+
+          setAgendaOpsSyncStatus('syncing')
+          setAgendaOpsSyncError('')
+
+          for (const batch of readyBatches) {
+            const latestSession = useMeetingStore.getState().currentSession
+            if (!latestSession || latestSession.id !== meetingId) {
+              break
+            }
+
+            const bootstrapResult = await AgendaV2DatabaseService.bootstrapAgendaFromSession(latestSession)
+            if (!bootstrapResult.success) {
+              AgendaOpsSyncQueueService.markRetry(batch.id, bootstrapResult.error || '初始化失败')
+              setAgendaOpsSyncStatus('failed')
+              setAgendaOpsSyncError(bootstrapResult.error || '初始化失败')
+              break
+            }
+
+            const baseAgendaVersion = bootstrapResult.data?.agendaVersion || latestSession.agendaVersion || 1
+            let applyResult = await AgendaV2DatabaseService.applyAgendaOps({
+              meetingId,
+              baseAgendaVersion,
+              ops: batch.ops,
+              clientTs: Date.now()
+            })
+
+            if (!applyResult.success && isAgendaVersionConflict(applyResult.error, applyResult.data?.code)) {
+              const latestCloud = await DatabaseService.getMeeting(meetingId)
+              if (latestCloud) {
+                const retryBaseVersion = latestCloud.agendaVersion || baseAgendaVersion
+                const retryResult = await AgendaV2DatabaseService.applyAgendaOps({
+                  meetingId,
+                  baseAgendaVersion: retryBaseVersion,
+                  ops: batch.ops,
+                  clientTs: Date.now()
+                })
+                if (retryResult.success) {
+                  applyResult = retryResult
+                } else {
+                  const refreshDecision = await Taro.showModal({
+                    title: '议程冲突',
+                    content: '检测到他人刚刚修改了议程。是否刷新到云端最新版本？',
+                    confirmText: '刷新最新',
+                    cancelText: '保留本地'
+                  })
+
+                  if (refreshDecision.confirm) {
+                    const refreshed = await refreshSessionFromCloud(meetingId)
+                    if (refreshed) {
+                      AgendaOpsSyncQueueService.removeBatch(batch.id)
+                      setAgendaOpsSyncStatus('idle')
+                      setAgendaOpsSyncError('')
+                      Taro.showToast({title: '已刷新到最新议程', icon: 'success'})
+                      continue
+                    }
+                  }
+
+                  applyResult = retryResult
+                }
+              }
+            }
+
+            if (!applyResult.success) {
+              const detail = applyResult.data
+              const isVersionConflict = isAgendaVersionConflict(applyResult.error, detail?.code)
+              if (isVersionConflict) {
+                AgendaOpsSyncQueueService.markRetry(batch.id, applyResult.error || detail?.code || '冲突未解决')
+                setAgendaOpsSyncStatus('failed')
+                setAgendaOpsSyncError(applyResult.error || detail?.code || '冲突未解决')
+              } else {
+                AgendaOpsSyncQueueService.markRetry(batch.id, applyResult.error || detail?.code || '同步失败')
+                setAgendaOpsSyncStatus('failed')
+                setAgendaOpsSyncError(applyResult.error || detail?.code || '同步失败')
+              }
+              break
+            }
+
+            const newVersion = applyResult.data?.newVersion
+            if (typeof newVersion === 'number') {
+              const newest = useMeetingStore.getState().currentSession
+              if (newest && newest.id === meetingId) {
+                const versionedSession: MeetingSession = {
+                  ...newest,
+                  agendaVersion: newVersion
+                }
+                setCurrentSession(versionedSession)
+                StorageService.saveSession(versionedSession, {syncToCloud: false})
+              }
+            }
+            AgendaOpsSyncQueueService.markSuccess(batch.id)
+          }
+
+          const nextRetryAt = AgendaOpsSyncQueueService.getNextRetryAt(meetingId)
+          if (nextRetryAt !== null && AgendaOpsSyncQueueService.hasPending(meetingId)) {
+            const delay = Math.max(300, nextRetryAt - Date.now())
+            agendaOpsRetryTimerRef.current = setTimeout(() => {
+              void drainAgendaOpsQueue(meetingId)
+            }, delay)
+          } else {
+            setAgendaOpsSyncStatus('idle')
+            setAgendaOpsSyncError('')
+          }
+        })
+        .catch((error) => {
+          console.warn('Agenda V2 queued sync failed:', error)
+          setAgendaOpsSyncStatus('failed')
+          setAgendaOpsSyncError(error instanceof Error ? error.message : '未知错误')
+        })
+
+      await agendaOpsSyncQueueRef.current
+    },
+    [isAgendaVersionConflict, refreshSessionFromCloud, setCurrentSession]
+  )
+
+  const syncAgendaOpsToCloud = useCallback(
+    async (sessionSnapshot: MeetingSession, ops: AgendaOpInput[]) => {
+      if (!sessionSnapshot) return
+      if (ops.length > 0) {
+        AgendaOpsSyncQueueService.enqueue(sessionSnapshot.id, ops)
+      }
+      await drainAgendaOpsQueue(sessionSnapshot.id)
+    },
+    [drainAgendaOpsQueue]
+  )
+  syncAgendaOpsToCloudRef.current = syncAgendaOpsToCloud
+
+  Taro.useDidShow(() => {
+    const latest = useMeetingStore.getState().currentSession
+    if (latest?.id) {
+      void drainAgendaOpsQueue(latest.id)
+    }
+  })
+
+  useEffect(() => {
+    if (!currentSession?.id || isRunning) return
+
+    const meetingId = currentSession.id
+    const channel = supabase
+      .channel(`agenda-v2-live-timer-${meetingId}`)
+      .on(
+        'postgres_changes',
+        {event: '*', schema: 'public', table: 'agenda_items_v2', filter: `meeting_id=eq.${meetingId}`},
+        () => {
+          void (async () => {
+            if (realtimeSyncBusyRef.current) return
+            if (AgendaOpsSyncQueueService.hasPending(meetingId)) return
+
+            realtimeSyncBusyRef.current = true
+            try {
+              const cloudSession = await DatabaseService.getMeeting(meetingId)
+              const localSession = useMeetingStore.getState().currentSession
+              if (!cloudSession || !localSession || localSession.id !== meetingId) return
+              if ((cloudSession.agendaVersion || 0) <= (localSession.agendaVersion || 0)) return
+
+              setCurrentSession(cloudSession)
+              StorageService.saveSession(cloudSession, {syncToCloud: false})
+            } finally {
+              realtimeSyncBusyRef.current = false
+            }
+          })()
+        }
+      )
+      .on('postgres_changes', {event: 'UPDATE', schema: 'public', table: 'meetings', filter: `id=eq.${meetingId}`}, () => {
+        void (async () => {
+          if (realtimeSyncBusyRef.current) return
+          if (AgendaOpsSyncQueueService.hasPending(meetingId)) return
+
+          realtimeSyncBusyRef.current = true
+          try {
+            const cloudSession = await DatabaseService.getMeeting(meetingId)
+            const localSession = useMeetingStore.getState().currentSession
+            if (!cloudSession || !localSession || localSession.id !== meetingId) return
+            if ((cloudSession.agendaVersion || 0) <= (localSession.agendaVersion || 0)) return
+
+            setCurrentSession(cloudSession)
+            StorageService.saveSession(cloudSession, {syncToCloud: false})
+          } finally {
+            realtimeSyncBusyRef.current = false
+          }
+        })()
+      })
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [currentSession?.id, isRunning, setCurrentSession])
+
+  const persistCheckpointSnapshot = useCallback(() => {
+    const latestSession = useMeetingStore.getState().currentSession || currentSession
+    if (!latestSession) return
+    const checkpointItems = flushCheckpoint({skipCheckpoint: true})
+    const checkpointSession = checkpointItems
+      ? {
+          ...latestSession,
+          items: latestSession.items.map((item) => {
+            const updated = checkpointItems.find((timedItem) => timedItem.id === item.id)
+            return updated || item
+          })
+        }
+      : null
+    if (!checkpointSession) return
+
+    setCurrentSession(checkpointSession)
+    StorageService.saveSession(checkpointSession, {syncToCloud: false})
+
+    const ops = buildTimerCheckpointOps(latestSession.items, checkpointSession.items)
+    if (ops.length > 0) {
+      void syncAgendaOpsToCloudRef.current(checkpointSession, ops)
+    }
+  }, [buildTimerCheckpointOps, currentSession, flushCheckpoint, setCurrentSession])
+
+  Taro.useDidHide(() => {
+    persistCheckpointSnapshot()
+  })
+
+  Taro.useUnload(() => {
+    if (agendaOpsRetryTimerRef.current) {
+      clearTimeout(agendaOpsRetryTimerRef.current)
+      agendaOpsRetryTimerRef.current = null
+    }
+    persistCheckpointSnapshot()
+  })
 
   // 打开编辑对话框
   const handleOpenEdit = () => {
@@ -150,6 +549,7 @@ export default function TimerPage() {
     if (!currentItem || !currentSession) return
 
     const duration = Number.parseInt(editDuration, 10) || 1
+    const currentItemId = currentItem.id
 
     // 解析实际耗时（格式：分钟:秒）
     let actualDurationInSeconds: number | undefined
@@ -165,20 +565,40 @@ export default function TimerPage() {
       }
     }
 
-    const updatedItem: MeetingItem = {
-      ...currentItem,
-      title: editTitle,
-      speaker: editSpeaker,
-      plannedDuration: duration * 60,
-      actualDuration: actualDurationInSeconds
-    }
-    const normalizedItem = updateCurrentItem(updatedItem)
+    const updatedSession = commitAgendaMutation((items) =>
+      items.map((item) => {
+        if (item.id !== currentItemId) return item
+        return {
+          ...item,
+          title: editTitle,
+          speaker: editSpeaker,
+          plannedDuration: duration * 60,
+          actualDuration: actualDurationInSeconds ?? item.actualDuration
+        }
+      })
+    )
 
-    // 更新 session
-    const updatedItems = currentSession.items.map((item) => (item.id === normalizedItem.id ? normalizedItem : item))
-    const updatedSession = {...currentSession, items: updatedItems}
-    setCurrentSession(updatedSession)
-    StorageService.saveSession(updatedSession)
+    if (updatedSession) {
+      const patchPayload: Record<string, unknown> = {
+        title: editTitle,
+        speaker: editSpeaker,
+        plannedDuration: duration * 60
+      }
+      if (actualDurationInSeconds !== undefined) {
+        patchPayload.actualDuration = actualDurationInSeconds
+      }
+
+      void syncAgendaOpsToCloud(updatedSession, [
+        {
+          opId: generateId('op'),
+          type: 'update_item',
+          itemKey: currentItemId,
+          payload: {
+            patch: patchPayload
+          }
+        }
+      ])
+    }
 
     setShowEditDialog(false)
     Taro.showToast({title: '已更新', icon: 'success'})
@@ -197,18 +617,58 @@ export default function TimerPage() {
       ruleId: 'short'
     }
 
-    // 插入到当前环节之后
-    const allItems = [...currentSession.items]
-    const currentItemIndex = allItems.findIndex((item) => item.id === currentItem?.id)
-    if (currentItemIndex !== -1) {
-      allItems.splice(currentItemIndex + 1, 0, newItem)
-    } else {
-      allItems.push(newItem)
-    }
+    const updatedSession = commitAgendaMutation((items) => {
+      const allItems = [...items]
+      const currentItemIndex = allItems.findIndex((item) => item.id === currentItem?.id)
+      if (currentItemIndex !== -1) {
+        allItems.splice(currentItemIndex + 1, 0, newItem)
+      } else {
+        allItems.push(newItem)
+      }
+      return allItems
+    })
 
-    const updatedSession = {...currentSession, items: allItems}
-    setCurrentSession(updatedSession)
-    StorageService.saveSession(updatedSession)
+    if (updatedSession) {
+      const newIndex = updatedSession.items.findIndex((item) => item.id === newItem.id)
+      const shiftOps: AgendaOpInput[] = updatedSession.items
+        .map((item, index) => ({item, index}))
+        .filter(({item, index}) => item.id !== newItem.id && index >= newIndex)
+        .sort((a, b) => b.index - a.index)
+        .map(({item, index}) => ({
+          opId: generateId('op'),
+          type: 'move_item',
+          itemKey: item.id,
+          payload: {
+            parentItemKey: null,
+            orderIndex: index,
+            depth: 1
+          }
+        }))
+
+      const createOp: AgendaOpInput = {
+        opId: generateId('op'),
+        type: 'create_item',
+        itemKey: newItem.id,
+        payload: {
+          item: {
+            itemKey: newItem.id,
+            title: newItem.title,
+            speaker: newItem.speaker || null,
+            plannedDuration: newItem.plannedDuration,
+            orderIndex: Math.max(newIndex, 0),
+            itemType: newItem.type,
+            ruleId: newItem.ruleId,
+            nodeKind: 'leaf',
+            budgetMode: 'independent',
+            consumeParentBudget: true,
+            statusCode: 'initial',
+            statusColor: 'blue',
+            statusRuleProfile: newItem.plannedDuration > 300 ? 'gt5m' : 'lte5m'
+          }
+        }
+      }
+      void syncAgendaOpsToCloud(updatedSession, [...shiftOps, createOp])
+    }
 
     setShowAddDialog(false)
     setEditTitle('')
@@ -247,14 +707,22 @@ export default function TimerPage() {
       success: (res) => {
         if (res.confirm) {
           // 从 session 中删除当前环节
-          const updatedItems = currentSession.items.filter((item) => item.id !== currentItem.id)
+          const updatedItems = activeItems.filter((item) => item.id !== currentItem.id)
           if (updatedItems.length === 0) {
             Taro.showToast({title: '至少保留一个环节', icon: 'none'})
             return
           }
-          const updatedSession = {...currentSession, items: updatedItems}
-          setCurrentSession(updatedSession)
-          StorageService.saveSession(updatedSession)
+          const updatedSession = commitAgendaMutation((items) => items.filter((item) => item.id !== currentItem.id))
+          if (updatedSession) {
+            const deleteOp: AgendaOpInput = {
+              opId: generateId('op'),
+              type: 'delete_item',
+              itemKey: currentItem.id,
+              payload: {}
+            }
+            const orderOps = buildOrderOps(updatedSession.items)
+            void syncAgendaOpsToCloud(updatedSession, [deleteOp, ...orderOps])
+          }
           Taro.showToast({title: '已删除', icon: 'success'})
         }
       }
@@ -302,8 +770,9 @@ export default function TimerPage() {
   }, [openTimeEditDialog])
 
   // 保存快速编辑的时间
-  const handleSaveTimeEdit = useCallback(async () => {
+  const handleSaveTimeEdit = useCallback(() => {
     if (!currentItem || !currentSession) return
+    const currentItemId = currentItem.id
 
     const newDuration = selectedMinutes * 60 + selectedSeconds
 
@@ -312,28 +781,41 @@ export default function TimerPage() {
       return
     }
 
-    // 更新当前环节
-    const updatedItem: MeetingItem = {
-      ...currentItem,
-      plannedDuration: newDuration
+    const updatedSession = commitAgendaMutation((items) =>
+      items.map((item) => {
+        if (item.id !== currentItemId) return item
+        return {
+          ...item,
+          plannedDuration: newDuration
+        }
+      })
+    )
+
+    if (updatedSession) {
+      void syncAgendaOpsToCloud(updatedSession, [
+        {
+          opId: generateId('op'),
+          type: 'update_item',
+          itemKey: currentItemId,
+          payload: {
+            patch: {
+              plannedDuration: newDuration
+            }
+          }
+        }
+      ])
     }
-
-    const normalizedItem = updateCurrentItem(updatedItem)
-
-    // 更新session
-    const updatedItems = currentSession.items.map((item) => (item.id === normalizedItem.id ? normalizedItem : item))
-    const updatedSession = {...currentSession, items: updatedItems}
-    setCurrentSession(updatedSession)
-
-    // 保存到localStorage
-    StorageService.saveSession(updatedSession)
-
-    // 保存到数据库
-    await DatabaseService.saveMeeting(updatedSession)
 
     setShowTimeEditDialog(false)
     Taro.showToast({title: '时间已更新', icon: 'success'})
-  }, [currentItem, currentSession, selectedMinutes, selectedSeconds, updateCurrentItem, setCurrentSession])
+  }, [
+    commitAgendaMutation,
+    currentItem,
+    currentSession,
+    selectedMinutes,
+    selectedSeconds,
+    syncAgendaOpsToCloud
+  ])
 
   // 生成分钟和秒的选择器数据
   const minutesRange = useMemo(() => Array.from({length: 60}, (_, i) => i.toString()), [])
@@ -391,6 +873,11 @@ export default function TimerPage() {
           {currentIndex + 1} / {totalItems}
         </Text>
         <View className="w-8" />
+      </View>
+      <View className={`${isCompact ? 'px-4 pb-2' : 'px-5 pb-3'}`}>
+        <Text className={`${isCompact ? 'text-[11px]' : 'text-xs'} ${cloudSyncClassName} block truncate`}>
+          {cloudSyncText}
+        </Text>
       </View>
 
       <ScrollView scrollY enableFlex className="flex-1 w-full">

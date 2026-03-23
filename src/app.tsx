@@ -3,6 +3,8 @@
  */
 
 import type {PropsWithChildren} from 'react'
+import {RouteGuard} from '@/components/RouteGuard'
+import {AuthProvider} from '@/contexts/AuthContext'
 import {useTabBarPageClass} from '@/hooks/useTabBarPageClass'
 
 import './app.scss'
@@ -10,7 +12,11 @@ import './app.scss'
 function App({children}: PropsWithChildren) {
   useTabBarPageClass()
 
-  return children
+  return (
+    <AuthProvider>
+      <RouteGuard>{children}</RouteGuard>
+    </AuthProvider>
+  )
 }
 
 export default App

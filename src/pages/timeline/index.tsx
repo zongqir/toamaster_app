@@ -1,12 +1,16 @@
 import {Button, Input, ScrollView, Text, View} from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import {useCallback, useEffect, useState} from 'react'
+import {useCallback, useEffect, useRef, useState} from 'react'
 import MeetingStats from '../../components/MeetingStats'
 import PasswordModal from '../../components/PasswordModal'
+import {supabase} from '../../client/supabase'
+import {AgendaV2DatabaseService} from '../../db/agendaV2Database'
 import {DatabaseService} from '../../db/database'
 import {VotingDatabaseService} from '../../db/votingDatabase'
+import {AgendaOpsSyncQueueService} from '../../services/agendaOpsSyncQueue'
 import {StorageService} from '../../services/storage'
 import {useMeetingStore} from '../../store/meetingStore'
+import type {AgendaOpInput} from '../../types/agendaV2'
 import type {MeetingItem} from '../../types/meeting'
 import {verifyPassword} from '../../utils/auth'
 import {generateId} from '../../utils/id'
@@ -24,6 +28,290 @@ export default function TimelinePage() {
   const [meetingLinkInput, setMeetingLinkInput] = useState('')
   const [isEditingLink, setIsEditingLink] = useState(false)
   const [passwordAction, setPasswordAction] = useState<'reset' | 'addLink' | null>(null)
+  const [agendaOpsSyncStatus, setAgendaOpsSyncStatus] = useState<'idle' | 'syncing' | 'failed'>('idle')
+  const [agendaOpsSyncError, setAgendaOpsSyncError] = useState('')
+  const agendaOpsSyncQueueRef = useRef(Promise.resolve())
+  const agendaOpsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const realtimeSyncBusyRef = useRef(false)
+  const deferredPatchRef = useRef<Map<string, Record<string, unknown>>>(new Map())
+  const deferredTimerRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  const mapItemUpdatesToPatch = useCallback((updates: Partial<MeetingItem>): Record<string, unknown> => {
+    const patch: Record<string, unknown> = {}
+    if (updates.title !== undefined) patch.title = updates.title
+    if (updates.speaker !== undefined) patch.speaker = updates.speaker
+    if (updates.plannedDuration !== undefined) patch.plannedDuration = updates.plannedDuration
+    if (updates.type !== undefined) patch.itemType = updates.type
+    if (updates.ruleId !== undefined) patch.ruleId = updates.ruleId
+    if (updates.parentTitle !== undefined) patch.parentTitle = updates.parentTitle
+    if (updates.disabled !== undefined) patch.disabled = updates.disabled
+    return patch
+  }, [])
+
+  const buildOrderOps = useCallback((nextItems: MeetingItem[], includeItemIds?: Set<string>): AgendaOpInput[] => {
+    return nextItems
+      .map((item, index) => ({item, index}))
+      .filter(({item}) => (includeItemIds ? includeItemIds.has(item.id) : true))
+      .map(({item, index}) => ({
+        opId: generateId('op'),
+        type: 'move_item' as const,
+        itemKey: item.id,
+        payload: {
+          parentItemKey: null,
+          orderIndex: index,
+          depth: 1
+        }
+      }))
+  }, [])
+
+  const isAgendaVersionConflict = useCallback((errorText?: string, code?: string) => {
+    if (code === 'VERSION_CONFLICT' || code === 'ROW_VERSION_CONFLICT') return true
+    if (!errorText) return false
+    return errorText.includes('VERSION_CONFLICT') || errorText.includes('ROW_VERSION_CONFLICT')
+  }, [])
+
+  const refreshSessionFromCloud = useCallback(
+    async (meetingId: string): Promise<boolean> => {
+      const cloudSession = await DatabaseService.getMeeting(meetingId)
+      if (!cloudSession) {
+        Taro.showToast({title: '获取云端最新议程失败', icon: 'none'})
+        return false
+      }
+
+      setCurrentSession(cloudSession)
+      setItems(cloudSession.items)
+      setMetadata(cloudSession.metadata)
+      StorageService.saveSession(cloudSession, {syncToCloud: false})
+      return true
+    },
+    [setCurrentSession]
+  )
+
+  const drainAgendaOpsQueue = useCallback(
+    async (meetingId: string) => {
+      agendaOpsSyncQueueRef.current = agendaOpsSyncQueueRef.current
+        .then(async () => {
+          if (agendaOpsRetryTimerRef.current) {
+            clearTimeout(agendaOpsRetryTimerRef.current)
+            agendaOpsRetryTimerRef.current = null
+          }
+
+          const readyBatches = AgendaOpsSyncQueueService.listReadyBatches(meetingId)
+          if (readyBatches.length === 0) {
+            setAgendaOpsSyncStatus(AgendaOpsSyncQueueService.hasPending(meetingId) ? 'syncing' : 'idle')
+            return
+          }
+
+          setAgendaOpsSyncStatus('syncing')
+          setAgendaOpsSyncError('')
+
+          for (const batch of readyBatches) {
+            const latest = useMeetingStore.getState().currentSession
+            if (!latest || latest.id !== meetingId) {
+              break
+            }
+
+            const bootstrapResult = await AgendaV2DatabaseService.bootstrapAgendaFromSession(latest)
+            if (!bootstrapResult.success) {
+              AgendaOpsSyncQueueService.markRetry(batch.id, bootstrapResult.error || '初始化失败')
+              setAgendaOpsSyncStatus('failed')
+              setAgendaOpsSyncError(bootstrapResult.error || '初始化失败')
+              break
+            }
+
+            const baseAgendaVersion = bootstrapResult.data?.agendaVersion || latest.agendaVersion || 1
+            let applyResult = await AgendaV2DatabaseService.applyAgendaOps({
+              meetingId,
+              baseAgendaVersion,
+              ops: batch.ops,
+              clientTs: Date.now()
+            })
+
+            if (!applyResult.success && isAgendaVersionConflict(applyResult.error, applyResult.data?.code)) {
+              const latestCloud = await DatabaseService.getMeeting(meetingId)
+              if (latestCloud) {
+                const retryBaseVersion = latestCloud.agendaVersion || baseAgendaVersion
+                const retryResult = await AgendaV2DatabaseService.applyAgendaOps({
+                  meetingId,
+                  baseAgendaVersion: retryBaseVersion,
+                  ops: batch.ops,
+                  clientTs: Date.now()
+                })
+                if (retryResult.success) {
+                  applyResult = retryResult
+                } else {
+                  const refreshDecision = await Taro.showModal({
+                    title: '议程冲突',
+                    content: '检测到他人刚刚修改了议程。是否刷新到云端最新版本？',
+                    confirmText: '刷新最新',
+                    cancelText: '保留本地'
+                  })
+
+                  if (refreshDecision.confirm) {
+                    const refreshed = await refreshSessionFromCloud(meetingId)
+                    if (refreshed) {
+                      // 用户选择刷新，丢弃当前冲突 batch
+                      AgendaOpsSyncQueueService.removeBatch(batch.id)
+                      setAgendaOpsSyncStatus('idle')
+                      setAgendaOpsSyncError('')
+                      Taro.showToast({title: '已刷新到最新议程', icon: 'success'})
+                      continue
+                    }
+                  }
+
+                  applyResult = retryResult
+                }
+              }
+            }
+
+            if (!applyResult.success) {
+              const detail = applyResult.data
+              const isVersionConflict = isAgendaVersionConflict(applyResult.error, detail?.code)
+              if (isVersionConflict) {
+                setAgendaOpsSyncStatus('failed')
+                setAgendaOpsSyncError(applyResult.error || detail?.code || '冲突未解决')
+                AgendaOpsSyncQueueService.markRetry(batch.id, applyResult.error || detail?.code || '冲突未解决')
+              } else {
+                AgendaOpsSyncQueueService.markRetry(batch.id, applyResult.error || detail?.code || '同步失败')
+                setAgendaOpsSyncStatus('failed')
+                setAgendaOpsSyncError(applyResult.error || detail?.code || '同步失败')
+              }
+              break
+            }
+
+            const newVersion = applyResult.data?.newVersion
+            if (typeof newVersion === 'number') {
+              const newest = useMeetingStore.getState().currentSession
+              if (newest && newest.id === meetingId) {
+                const versionedSession = {
+                  ...newest,
+                  agendaVersion: newVersion
+                }
+                setCurrentSession(versionedSession)
+                StorageService.saveSession(versionedSession, {syncToCloud: false})
+              }
+            }
+            AgendaOpsSyncQueueService.markSuccess(batch.id)
+          }
+
+          const nextRetryAt = AgendaOpsSyncQueueService.getNextRetryAt(meetingId)
+          if (nextRetryAt !== null && AgendaOpsSyncQueueService.hasPending(meetingId)) {
+            const delay = Math.max(300, nextRetryAt - Date.now())
+            agendaOpsRetryTimerRef.current = setTimeout(() => {
+              void drainAgendaOpsQueue(meetingId)
+            }, delay)
+          } else {
+            setAgendaOpsSyncStatus('idle')
+            setAgendaOpsSyncError('')
+          }
+        })
+        .catch((error) => {
+          console.warn('Timeline Agenda V2 queue failed:', error)
+          setAgendaOpsSyncStatus('failed')
+          setAgendaOpsSyncError(error instanceof Error ? error.message : '同步队列异常')
+        })
+
+      await agendaOpsSyncQueueRef.current
+    },
+    [isAgendaVersionConflict, refreshSessionFromCloud, setCurrentSession]
+  )
+
+  const syncAgendaOpsToCloud = useCallback(
+    async (ops: AgendaOpInput[]) => {
+      const latest = useMeetingStore.getState().currentSession || currentSession
+      if (!latest) return
+
+      if (ops.length > 0) {
+        AgendaOpsSyncQueueService.enqueue(latest.id, ops)
+      }
+      await drainAgendaOpsQueue(latest.id)
+    },
+    [currentSession, drainAgendaOpsQueue]
+  )
+
+  Taro.useDidShow(() => {
+    const latest = useMeetingStore.getState().currentSession
+    if (latest?.id) {
+      void drainAgendaOpsQueue(latest.id)
+    }
+  })
+
+  const flushDeferredPatchForItem = useCallback(
+    async (itemId: string) => {
+      const timer = deferredTimerRef.current.get(itemId)
+      if (timer) {
+        clearTimeout(timer)
+        deferredTimerRef.current.delete(itemId)
+      }
+
+      const patch = deferredPatchRef.current.get(itemId)
+      if (!patch) return
+
+      deferredPatchRef.current.delete(itemId)
+      await syncAgendaOpsToCloud([
+        {
+          opId: generateId('op'),
+          type: 'update_item',
+          itemKey: itemId,
+          payload: {patch}
+        }
+      ])
+    },
+    [syncAgendaOpsToCloud]
+  )
+
+  const flushAllDeferredPatches = useCallback(async () => {
+    const ids = Array.from(deferredPatchRef.current.keys())
+    for (const id of ids) {
+      await flushDeferredPatchForItem(id)
+    }
+  }, [flushDeferredPatchForItem])
+
+  const scheduleDeferredPatch = useCallback(
+    (itemId: string, patch: Record<string, unknown>) => {
+      const existingPatch = deferredPatchRef.current.get(itemId) || {}
+      deferredPatchRef.current.set(itemId, {...existingPatch, ...patch})
+
+      const prevTimer = deferredTimerRef.current.get(itemId)
+      if (prevTimer) clearTimeout(prevTimer)
+
+      const timer = setTimeout(() => {
+        void flushDeferredPatchForItem(itemId)
+      }, 500)
+      deferredTimerRef.current.set(itemId, timer)
+    },
+    [flushDeferredPatchForItem]
+  )
+
+  const commitItemsMutation = useCallback(
+    (
+      mutate: (prevItems: MeetingItem[]) => MeetingItem[],
+      buildOps?: (prevItems: MeetingItem[], nextItems: MeetingItem[]) => AgendaOpInput[]
+    ) => {
+      const latestSession = useMeetingStore.getState().currentSession || currentSession
+      if (!latestSession) return
+
+      const prevItems = latestSession.items
+      const nextItems = mutate(prevItems)
+      setItems(nextItems)
+
+      const updatedSession = {
+        ...latestSession,
+        items: nextItems,
+        metadata
+      }
+      setCurrentSession(updatedSession)
+      StorageService.saveSession(updatedSession, {syncToCloud: false})
+
+      if (buildOps) {
+        const ops = buildOps(prevItems, nextItems)
+        if (ops.length > 0) {
+          void syncAgendaOpsToCloud(ops)
+        }
+      }
+    },
+    [currentSession, items, metadata, setCurrentSession, syncAgendaOpsToCloud]
+  )
 
   useEffect(() => {
     try {
@@ -73,6 +361,81 @@ export default function TimelinePage() {
   }, [currentSession, isCloudSession, loadMeetingLink])
 
   useEffect(() => {
+    if (!currentSession?.id) return
+    void drainAgendaOpsQueue(currentSession.id)
+  }, [currentSession?.id, drainAgendaOpsQueue])
+
+  useEffect(() => {
+    if (!currentSession?.id) return
+    const meetingId = currentSession.id
+    const channel = supabase
+      .channel(`agenda-v2-live-${meetingId}`)
+      .on(
+        'postgres_changes',
+        {event: '*', schema: 'public', table: 'agenda_items_v2', filter: `meeting_id=eq.${meetingId}`},
+        () => {
+          void (async () => {
+            if (realtimeSyncBusyRef.current) return
+            if (AgendaOpsSyncQueueService.hasPending(meetingId)) return
+
+            realtimeSyncBusyRef.current = true
+            try {
+              const cloudSession = await DatabaseService.getMeeting(meetingId)
+              const latestLocal = useMeetingStore.getState().currentSession
+              if (!cloudSession || !latestLocal || latestLocal.id !== meetingId) return
+              if ((cloudSession.agendaVersion || 0) <= (latestLocal.agendaVersion || 0)) return
+
+              setCurrentSession(cloudSession)
+              setItems(cloudSession.items)
+              setMetadata(cloudSession.metadata)
+              StorageService.saveSession(cloudSession, {syncToCloud: false})
+            } finally {
+              realtimeSyncBusyRef.current = false
+            }
+          })()
+        }
+      )
+      .on('postgres_changes', {event: 'UPDATE', schema: 'public', table: 'meetings', filter: `id=eq.${meetingId}`}, () => {
+        void (async () => {
+          if (realtimeSyncBusyRef.current) return
+          if (AgendaOpsSyncQueueService.hasPending(meetingId)) return
+
+          realtimeSyncBusyRef.current = true
+          try {
+            const cloudSession = await DatabaseService.getMeeting(meetingId)
+            const latestLocal = useMeetingStore.getState().currentSession
+            if (!cloudSession || !latestLocal || latestLocal.id !== meetingId) return
+            if ((cloudSession.agendaVersion || 0) <= (latestLocal.agendaVersion || 0)) return
+
+            setCurrentSession(cloudSession)
+            setItems(cloudSession.items)
+            setMetadata(cloudSession.metadata)
+            StorageService.saveSession(cloudSession, {syncToCloud: false})
+          } finally {
+            realtimeSyncBusyRef.current = false
+          }
+        })()
+      })
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [currentSession?.id, setCurrentSession])
+
+  useEffect(() => {
+    return () => {
+      if (agendaOpsRetryTimerRef.current) {
+        clearTimeout(agendaOpsRetryTimerRef.current)
+        agendaOpsRetryTimerRef.current = null
+      }
+      deferredTimerRef.current.forEach((timer) => clearTimeout(timer))
+      deferredTimerRef.current.clear()
+      deferredPatchRef.current.clear()
+    }
+  }, [])
+
+  useEffect(() => {
     if (currentSession) return
 
     // 给 Zustand 状态同步留一个缓冲窗口，避免页面切换瞬间白屏闪烁
@@ -83,11 +446,23 @@ export default function TimelinePage() {
     return () => clearTimeout(timer)
   }, [currentSession])
 
-  const handleSaveAndStart = () => {
+  const handleSaveAndStart = async () => {
     if (!currentSession) return
+    await flushAllDeferredPatches()
+    await drainAgendaOpsQueue(currentSession.id)
+    await agendaOpsSyncQueueRef.current
     const updatedSession = {...currentSession, items, metadata}
     setCurrentSession(updatedSession)
-    StorageService.saveSession(updatedSession)
+    StorageService.saveSession(updatedSession, {syncToCloud: false})
+
+    if (isCloudSession) {
+      const metadataResult = await DatabaseService.updateMeetingMetadata(updatedSession.id, updatedSession.metadata, {
+        isCompleted: false
+      })
+      if (!metadataResult.success) {
+        Taro.showToast({title: `基础信息同步失败：${metadataResult.error}`, icon: 'none'})
+      }
+    }
     void safeNavigateTo('/pages/timer/index')
   }
 
@@ -244,7 +619,7 @@ export default function TimelinePage() {
 
     const updatedSession = {...currentSession, metadata: updatedMetadata}
     setCurrentSession(updatedSession)
-    StorageService.saveSession(updatedSession)
+    StorageService.saveSession(updatedSession, {syncToCloud: false})
 
     // 保存到数据库（使用独立的 meeting_links 表）
     if (isCloudSession) {
@@ -262,6 +637,8 @@ export default function TimelinePage() {
 
   const performReset = async () => {
     if (!currentSession) return
+    await flushAllDeferredPatches()
+    await agendaOpsSyncQueueRef.current
 
     // 1. 清空所有实际用时记录
     const resetItems = items.map((item) => ({
@@ -307,11 +684,30 @@ export default function TimelinePage() {
     setCurrentSession(resetSession)
     StorageService.saveSession(resetSession, {syncToCloud: false})
 
-    // 6. 如果是云端会议，同步到数据库
+    // 6. 同步重置后的计时字段到 Agenda V2
+    const checkpointResetOps: AgendaOpInput[] = resetItems.map((item) => ({
+      opId: generateId('op'),
+      type: 'timer_checkpoint',
+      itemKey: item.id,
+      payload: {
+        patch: {
+          actualDuration: null,
+          actualStartTime: null,
+          actualEndTime: null
+        }
+      }
+    }))
+    if (checkpointResetOps.length > 0) {
+      await syncAgendaOpsToCloud(checkpointResetOps)
+    }
+
+    // 7. 会议完成状态回滚
     if (isCloudSession) {
-      const result = await DatabaseService.saveMeeting(resetSession)
-      if (!result.success) {
-        Taro.showToast({title: `保存失败：${result.error}`, icon: 'none'})
+      const statusResult = await DatabaseService.updateMeetingMetadata(currentSession.id, resetMetadata, {
+        isCompleted: false
+      })
+      if (!statusResult.success) {
+        Taro.showToast({title: `状态同步失败：${statusResult.error}`, icon: 'none'})
         return
       }
     }
@@ -320,28 +716,129 @@ export default function TimelinePage() {
     Taro.showToast({title: '已重置会议', icon: 'success'})
   }
 
-  const updateItem = (id: string, updates: Partial<MeetingItem>) => {
-    setItems((prev) => prev.map((item) => (item.id === id ? {...item, ...updates} : item)))
+  const updateItem = (id: string, updates: Partial<MeetingItem>, options?: {deferred?: boolean}) => {
+    const patch = mapItemUpdatesToPatch(updates)
+    commitItemsMutation((prev) => prev.map((item) => (item.id === id ? {...item, ...updates} : item)))
+
+    if (Object.keys(patch).length === 0) return
+
+    if (options?.deferred) {
+      scheduleDeferredPatch(id, patch)
+      return
+    }
+
+    void syncAgendaOpsToCloud([
+      {
+        opId: generateId('op'),
+        type: 'update_item',
+        itemKey: id,
+        payload: {patch}
+      }
+    ])
   }
 
   const removeItem = (id: string) => {
-    setItems((prev) => prev.filter((item) => item.id !== id))
+    const pendingTimer = deferredTimerRef.current.get(id)
+    if (pendingTimer) {
+      clearTimeout(pendingTimer)
+      deferredTimerRef.current.delete(id)
+    }
+    deferredPatchRef.current.delete(id)
+
+    let removedIndex = -1
+    commitItemsMutation(
+      (prev) => {
+        removedIndex = prev.findIndex((item) => item.id === id)
+        return prev.filter((item) => item.id !== id)
+      },
+      (_prev, next) => {
+        if (removedIndex < 0) return []
+        const shiftedIds = new Set(next.filter((_, idx) => idx >= removedIndex).map((item) => item.id))
+        return [
+          {
+            opId: generateId('op'),
+            type: 'delete_item' as const,
+            itemKey: id,
+            payload: {}
+          },
+          ...buildOrderOps(next, shiftedIds)
+        ]
+      }
+    )
   }
 
   // 上移环节
   const moveItemUp = (index: number) => {
     if (index === 0) return
-    const newItems = [...items]
-    ;[newItems[index - 1], newItems[index]] = [newItems[index], newItems[index - 1]]
-    setItems(newItems)
+    const moving = items[index]
+    const upper = items[index - 1]
+    if (!moving || !upper) return
+
+    const tempOrder = 1000000000 + index
+    commitItemsMutation(
+      (prev) => {
+        const newItems = [...prev]
+        ;[newItems[index - 1], newItems[index]] = [newItems[index], newItems[index - 1]]
+        return newItems
+      },
+      () => [
+        {
+          opId: generateId('op'),
+          type: 'move_item',
+          itemKey: moving.id,
+          payload: {parentItemKey: null, orderIndex: tempOrder, depth: 1}
+        },
+        {
+          opId: generateId('op'),
+          type: 'move_item',
+          itemKey: upper.id,
+          payload: {parentItemKey: null, orderIndex: index, depth: 1}
+        },
+        {
+          opId: generateId('op'),
+          type: 'move_item',
+          itemKey: moving.id,
+          payload: {parentItemKey: null, orderIndex: index - 1, depth: 1}
+        }
+      ]
+    )
   }
 
   // 下移环节
   const moveItemDown = (index: number) => {
     if (index === items.length - 1) return
-    const newItems = [...items]
-    ;[newItems[index], newItems[index + 1]] = [newItems[index + 1], newItems[index]]
-    setItems(newItems)
+    const moving = items[index]
+    const lower = items[index + 1]
+    if (!moving || !lower) return
+
+    const tempOrder = 1000000000 + index
+    commitItemsMutation(
+      (prev) => {
+        const newItems = [...prev]
+        ;[newItems[index], newItems[index + 1]] = [newItems[index + 1], newItems[index]]
+        return newItems
+      },
+      () => [
+        {
+          opId: generateId('op'),
+          type: 'move_item',
+          itemKey: moving.id,
+          payload: {parentItemKey: null, orderIndex: tempOrder, depth: 1}
+        },
+        {
+          opId: generateId('op'),
+          type: 'move_item',
+          itemKey: lower.id,
+          payload: {parentItemKey: null, orderIndex: index, depth: 1}
+        },
+        {
+          opId: generateId('op'),
+          type: 'move_item',
+          itemKey: moving.id,
+          payload: {parentItemKey: null, orderIndex: index + 1, depth: 1}
+        }
+      ]
+    )
   }
 
   // 在指定位置插入新环节
@@ -354,9 +851,52 @@ export default function TimelinePage() {
       type: 'other',
       ruleId: 'short'
     }
-    const newItems = [...items]
-    newItems.splice(index, 0, newItem)
-    setItems(newItems)
+
+    commitItemsMutation(
+      (prev) => {
+        const newItems = [...prev]
+        newItems.splice(index, 0, newItem)
+        return newItems
+      },
+      (_prev, next) => {
+        const insertedIndex = next.findIndex((item) => item.id === newItem.id)
+        const shiftOps = next
+          .map((item, idx) => ({item, idx}))
+          .filter(({item, idx}) => item.id !== newItem.id && idx >= insertedIndex)
+          .sort((a, b) => b.idx - a.idx)
+          .map(({item, idx}) => ({
+            opId: generateId('op'),
+            type: 'move_item' as const,
+            itemKey: item.id,
+            payload: {parentItemKey: null, orderIndex: idx, depth: 1}
+          }))
+
+        const createOp: AgendaOpInput = {
+          opId: generateId('op'),
+          type: 'create_item',
+          itemKey: newItem.id,
+          payload: {
+            item: {
+              itemKey: newItem.id,
+              title: newItem.title,
+              speaker: newItem.speaker || null,
+              plannedDuration: newItem.plannedDuration,
+              orderIndex: Math.max(insertedIndex, 0),
+              itemType: newItem.type,
+              ruleId: newItem.ruleId,
+              nodeKind: 'leaf',
+              budgetMode: 'independent',
+              consumeParentBudget: true,
+              statusCode: 'initial',
+              statusColor: 'blue',
+              statusRuleProfile: newItem.plannedDuration > 300 ? 'gt5m' : 'lte5m'
+            }
+          }
+        }
+        return [...shiftOps, createOp]
+      }
+    )
+
     Taro.showToast({title: '已添加环节', icon: 'success'})
   }
 
@@ -375,6 +915,12 @@ export default function TimelinePage() {
   }
 
   const isCompleted = currentSession?.isCompleted || false
+  const agendaSyncText =
+    agendaOpsSyncStatus === 'syncing'
+      ? '议程增量同步中...'
+      : agendaOpsSyncStatus === 'failed'
+      ? `议程增量同步失败${agendaOpsSyncError ? `：${agendaOpsSyncError}` : ''}`
+      : '议程已增量保存'
 
   console.log('Timeline Debug:', {
     hasSession: !!currentSession,
@@ -457,6 +1003,16 @@ export default function TimelinePage() {
             )}
           </View>
         </View>
+        <Text
+          className={`mb-2 block truncate text-xs ${
+            agendaOpsSyncStatus === 'failed'
+              ? 'text-red-300'
+              : agendaOpsSyncStatus === 'syncing'
+              ? 'text-amber-300'
+              : 'text-emerald-300'
+          }`}>
+          {agendaSyncText}
+        </Text>
 
         {!showStats && (
           <>
@@ -590,7 +1146,10 @@ export default function TimelinePage() {
                       <Input
                         className="text-base font-semibold text-foreground flex-1 min-w-0"
                         value={item.title}
-                        onInput={(e) => updateItem(item.id, {title: e.detail.value})}
+                        onInput={(e) => updateItem(item.id, {title: e.detail.value}, {deferred: true})}
+                        onBlur={() => {
+                          void flushDeferredPatchForItem(item.id)
+                        }}
                         adjustPosition={false}
                       />
                     </View>
@@ -633,7 +1192,10 @@ export default function TimelinePage() {
                         <Input
                           className="text-sm text-foreground/90 flex-1 min-w-[96px]"
                           value={item.speaker}
-                          onInput={(e) => updateItem(item.id, {speaker: e.detail.value})}
+                          onInput={(e) => updateItem(item.id, {speaker: e.detail.value}, {deferred: true})}
+                          onBlur={() => {
+                            void flushDeferredPatchForItem(item.id)
+                          }}
                           placeholder="负责人"
                           adjustPosition={false}
                         />
