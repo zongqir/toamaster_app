@@ -2,6 +2,7 @@ import {Input, Text, View} from '@tarojs/components'
 import Taro, {useDidShow} from '@tarojs/taro'
 import {useRef, useState} from 'react'
 import PasswordModal from '../../components/PasswordModal'
+import {AgendaV2DatabaseService} from '../../db/agendaV2Database'
 import {DatabaseService} from '../../db/database'
 import {StorageService} from '../../services/storage'
 import {useMeetingStore} from '../../store/meetingStore'
@@ -53,7 +54,7 @@ export default function HistoryPage() {
 
     setIsNavigating(true)
     setCurrentSession(session)
-    StorageService.saveSession(session)
+    StorageService.saveSession(session, {syncToCloud: false})
 
     const ok = await safeNavigateTo('/pages/timeline/index')
     if (!ok) {
@@ -224,16 +225,29 @@ export default function HistoryPage() {
       }))
     }
 
-    // 立即保存到本地存储
-    StorageService.saveSession(newSession, {syncToCloud: false})
-
     // 立即保存到数据库
-    await DatabaseService.saveMeeting(newSession)
+    const saveResult = await DatabaseService.saveMeeting(newSession)
+    if (!saveResult.success) {
+      Taro.showToast({title: `复制失败：${saveResult.error || '保存异常'}`, icon: 'none'})
+      return
+    }
 
-    setCurrentSession(newSession)
+    const bootstrapResult = await AgendaV2DatabaseService.bootstrapAgendaFromSession(newSession)
+    if (!bootstrapResult.success) {
+      console.warn('复制会议后初始化 Agenda V2 失败:', bootstrapResult.error)
+    }
+
+    const versionedSession: MeetingSession = {
+      ...newSession,
+      agendaVersion: bootstrapResult.data?.agendaVersion || newSession.agendaVersion || 1
+    }
+
+    // 保存到本地会话
+    StorageService.saveSession(versionedSession, {syncToCloud: false})
+    setCurrentSession(versionedSession)
     Taro.showToast({title: '已复制并保存会议', icon: 'success', duration: 1500})
     setTimeout(() => {
-      void goToTimeline(newSession)
+      void goToTimeline(versionedSession)
     }, 1500)
   }
 

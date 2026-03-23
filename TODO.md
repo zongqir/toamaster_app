@@ -1,5 +1,79 @@
 # 任务：实现会议投票功能（AI 智能分组版）
 
+> Agenda 重写设计文档：[`docs/AGENDA_REDESIGN_SPEC.md`](docs/AGENDA_REDESIGN_SPEC.md)
+
+## 🚧 Agenda 重写 Todo（逐条评审）
+
+> 约束：**必须按条推进**，每次只做一个可验证改动；禁止再走“整份 agenda 覆盖写”。
+
+### Phase 0 - 设计冻结（先定规则）
+- [ ] 明确并发模型：多人同会议编辑采用乐观锁（`agenda_version`），冲突返回并提示用户
+- [ ] 明确写入粒度：改为 item 级 patch（`create/update/delete/move`），不再 delete+upsert 全表
+- [ ] 明确冲突策略：`409` 后提供“刷新并重试/保留本地草稿”两种路径
+- [ ] 明确单一数据源：`meeting_link` 仅保留一处存储，去掉双写歧义
+
+### Phase 1 - 数据模型重构
+- [x] 为会议增加 `agenda_version`（默认 1）
+- [x] 为环节增加 `updated_at`（或 `row_version`）用于审计/冲突定位
+- [x] 增加操作日志结构（`agenda_ops`）字段设计：`op_id`、`meeting_id`、`base_version`、`type`、`payload`、`created_at`
+- [ ] 编写迁移脚本与回滚脚本（需可重复执行）
+
+### Phase 2 - 后端写入链路重写
+- [x] 新增 `applyAgendaOps`（事务）：校验 `base_version` -> 应用 ops -> `agenda_version + 1`
+- [ ] 替换 `saveMeeting` 的全量覆盖路径；移除 `meeting_items delete by meeting_id` 逻辑
+- [ ] 保证幂等：同一 `op_id` 重放不重复生效
+- [ ] 返回统一响应：`success/newVersion/conflicts`
+
+### 当前落地进度（2026-03-23）
+- [x] `00011_create_agenda_v2_core.sql`：Agenda V2 核心表、状态枚举、层级结构、操作日志基础
+- [x] `00012_agenda_v2_roles_and_rls.sql`：会议角色、投票审计字段、RLS 权限矩阵、投票策略重构
+- [x] `00013_add_apply_agenda_ops_rpc.sql`：原子 apply ops RPC（version 校验 + op 幂等 + 父预算校验）
+- [x] 新增 `src/db/agendaV2Database.ts`：Agenda V2 的 TS 数据访问层骨架（item/participant/cursor/ops/语法官/哼哈官）
+- [x] `AgendaV2DatabaseService.applyAgendaOps`：前端统一 RPC 入口
+- [x] `AgendaV2DatabaseService.bootstrapAgendaFromSession`：旧快照会话初始化到 V2 表
+- [x] 新增 `src/types/agendaV2.ts`：Agenda V2 领域类型定义
+- [x] `DatabaseService.getAllMeetings/getMeeting`：读取优先 `agenda_items_v2`，无 V2 数据自动回退 `meeting_items`
+- [x] 新建会议（导入/复制）保存后立即执行 `bootstrapAgendaFromSession`，首帧即写入 V2 表
+- [x] Timer 页面新增/编辑/删除/调时动作已并行写入 Agenda V2 ops（过渡期双写）
+- [x] Timeline 页面新增/删除/上移下移/时长调整/禁用切换已并行写入 Agenda V2 ops（标题与负责人为延迟 patch）
+- [x] Timer/Timeline patch 失败增加冲突提示文案（版本冲突可见化）
+- [x] Timer checkpoint（开始/暂停/切换/隐藏）改为 `timer_checkpoint` patch，同步状态独立展示
+- [x] `StorageService.saveSession` 默认仅本地保存，必须显式 `syncToCloud: true` 才允许旧整份云同步
+- [x] Timer/Timeline 冲突恢复：版本冲突时自动拉取云端版本重试一次，仍失败则弹窗选择“刷新到最新/保留本地”
+- [x] `StorageService` 云同步收敛：V2 会话先走 metadata-only，同步失败才回退旧 `saveMeeting`
+- [x] 新增 `AgendaOpsSyncQueueService`：本地持久化 ops 批次队列（跨页面/重启保留）
+- [x] Timer/Timeline 接入队列消费：失败指数退避重试，成功后删除批次
+- [x] Timeline/Timer 接入会议实时订阅：无本地 pending ops 时自动拉取云端更高版本
+- [x] AuthContext 登录后自动 upsert `user_identity_profiles`（昵称/头像/openid 尽力同步）
+- [x] 新增 `supabase/functions/wechat-miniprogram-login`：微信 `code` 换取 `openid/unionid`，生成 Supabase `magiclink token_hash`
+- [x] 登录页接入微信一键登录与登录后回跳（按 `RouteGuard` 缓存路径恢复）
+- [x] `App` 注入 `AuthProvider + RouteGuard`，登录态与页面访问守卫全局生效
+
+### Phase 3 - 客户端同步层重写
+- [ ] `StorageService` 从“快照队列”改为“操作日志队列”（持久化）
+- [ ] 本地提交改为：生成 op -> 先本地应用 -> 异步上云确认
+- [ ] 云端失败重试策略：指数退避 + 最大重试次数 + 可手动重试
+- [ ] 清理旧逻辑：移除基于“最后快照覆盖”的同步分支
+
+### Phase 4 - 页面行为重写（Timeline/Timer）
+- [ ] Timeline 的新增/删除/编辑/排序全部改成发 patch
+- [ ] Timer 的结构变更（新增/删除/调时/编辑）全部改成发 patch
+- [ ] 保留计时 checkpoint，但仅作为 patch 数据来源，不再提交全量 session
+- [ ] 新增冲突 UI：提示“他人已修改该议程”，可刷新对比后再提交
+
+### Phase 5 - 实时协作与可观测性
+- [ ] 订阅会议变更并增量更新 UI（非当前设备提交也可见）
+- [ ] 增加审计日志页面（谁在何时改了哪一条）
+- [ ] 增加关键监控：冲突率、重试率、最终失败率
+- [ ] 增加开关：可灰度启用新链路，支持快速回退
+
+### Phase 6 - 验收标准（全部满足才算完成）
+- [ ] 双端并发编辑不同条目，不再出现“后写覆盖前写”丢数据
+- [ ] 断网编辑后重连可自动补交操作，顺序正确
+- [ ] 会议中高频调整 agenda 时，UI 无明显卡顿
+- [ ] 历史数据可读取，且迁移后无数据丢失
+- [ ] 删除旧的全量覆盖写代码路径与无用字段
+
 ## ✅ 功能已完成并优化
 
 ### 核心功能

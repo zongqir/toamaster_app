@@ -1,5 +1,5 @@
 import {supabase} from '../client/supabase'
-import type {MeetingItem, MeetingSession} from '../types/meeting'
+import type {MeetingItem, MeetingMetadata, MeetingSession} from '../types/meeting'
 
 /**
  * 数据库会议记录类型
@@ -23,6 +23,7 @@ interface DBMeeting {
   created_by: string
   total_planned_duration: number
   total_actual_duration: number
+  agenda_version?: number
 }
 
 interface DBMeetingItem {
@@ -40,6 +41,58 @@ interface DBMeetingItem {
   disabled: boolean
   parent_title: string | null
   order_index: number
+}
+
+interface DBAgendaItemV2 {
+  meeting_id: string
+  item_key: string
+  title: string
+  speaker: string | null
+  planned_duration: number
+  actual_duration: number | null
+  actual_start_time: number | null
+  actual_end_time: number | null
+  start_time: string | null
+  item_type: string
+  rule_id: string
+  disabled: boolean
+  parent_title: string | null
+  order_index: number
+  deleted_at: number | null
+}
+
+function mapLegacyItemToMeetingItem(item: DBMeetingItem): MeetingItem {
+  return {
+    id: item.id,
+    title: item.title,
+    speaker: item.speaker || '',
+    plannedDuration: item.planned_duration,
+    actualDuration: item.actual_duration || undefined,
+    actualStartTime: item.actual_start_time || undefined,
+    actualEndTime: item.actual_end_time || undefined,
+    startTime: item.start_time || undefined,
+    type: item.item_type as MeetingItem['type'],
+    ruleId: item.rule_id,
+    disabled: item.disabled,
+    parentTitle: item.parent_title || undefined
+  }
+}
+
+function mapAgendaV2ItemToMeetingItem(item: DBAgendaItemV2): MeetingItem {
+  return {
+    id: item.item_key,
+    title: item.title,
+    speaker: item.speaker || '',
+    plannedDuration: item.planned_duration,
+    actualDuration: item.actual_duration || undefined,
+    actualStartTime: item.actual_start_time || undefined,
+    actualEndTime: item.actual_end_time || undefined,
+    startTime: item.start_time || undefined,
+    type: item.item_type as MeetingItem['type'],
+    ruleId: item.rule_id,
+    disabled: item.disabled,
+    parentTitle: item.parent_title || undefined
+  }
 }
 
 /**
@@ -74,7 +127,8 @@ export const DatabaseService = {
         created_at: session.createdAt,
         created_by: 'anonymous',
         total_planned_duration: totalPlanned,
-        total_actual_duration: totalActual
+        total_actual_duration: totalActual,
+        agenda_version: session.agendaVersion
       }
 
       // 保存会议基本信息（使用 upsert）
@@ -152,34 +206,54 @@ export const DatabaseService = {
 
       // 获取所有环节
       const meetingIds = meetings.map((m) => m.id)
-      const {data: items, error: itemsError} = await supabase
-        .from('meeting_items')
+      const meetingItemsMap = new Map<string, MeetingItem[]>()
+      const v2KnownMeetingIds = new Set<string>()
+
+      const {data: v2Items, error: v2ItemsError} = await supabase
+        .from('agenda_items_v2')
         .select('*')
         .in('meeting_id', meetingIds)
+        .order('meeting_id', {ascending: true})
         .order('order_index', {ascending: true})
 
-      if (itemsError) {
-        console.error('获取环节列表失败:', itemsError)
+      if (v2ItemsError) {
+        console.warn('获取 Agenda V2 环节失败，将回退旧表:', v2ItemsError.message)
+      } else {
+        ;((v2Items || []) as DBAgendaItemV2[]).forEach((item) => {
+          v2KnownMeetingIds.add(item.meeting_id)
+          if (item.deleted_at !== null) return
+
+          const mapped = mapAgendaV2ItemToMeetingItem(item)
+          const current = meetingItemsMap.get(item.meeting_id) || []
+          current.push(mapped)
+          meetingItemsMap.set(item.meeting_id, current)
+        })
+      }
+
+      const fallbackMeetingIds = meetingIds.filter((meetingId) => !v2KnownMeetingIds.has(meetingId))
+      if (fallbackMeetingIds.length > 0) {
+        const {data: legacyItems, error: legacyItemsError} = await supabase
+          .from('meeting_items')
+          .select('*')
+          .in('meeting_id', fallbackMeetingIds)
+          .order('meeting_id', {ascending: true})
+          .order('order_index', {ascending: true})
+
+        if (legacyItemsError) {
+          console.error('获取旧版环节列表失败:', legacyItemsError)
+        } else {
+          ;((legacyItems || []) as DBMeetingItem[]).forEach((item) => {
+            const mapped = mapLegacyItemToMeetingItem(item)
+            const current = meetingItemsMap.get(item.meeting_id) || []
+            current.push(mapped)
+            meetingItemsMap.set(item.meeting_id, current)
+          })
+        }
       }
 
       // 组装数据
       const sessions: MeetingSession[] = meetings.map((meeting) => {
-        const meetingItems = (items || [])
-          .filter((item) => item.meeting_id === meeting.id)
-          .map((item) => ({
-            id: item.id,
-            title: item.title,
-            speaker: item.speaker || '',
-            plannedDuration: item.planned_duration,
-            actualDuration: item.actual_duration || undefined,
-            actualStartTime: item.actual_start_time || undefined,
-            actualEndTime: item.actual_end_time || undefined,
-            startTime: item.start_time || undefined,
-            type: item.item_type as MeetingItem['type'],
-            ruleId: item.rule_id,
-            disabled: item.disabled,
-            parentTitle: item.parent_title || undefined
-          }))
+        const meetingItems = meetingItemsMap.get(meeting.id) || []
 
         return {
           id: meeting.id,
@@ -198,6 +272,7 @@ export const DatabaseService = {
           },
           items: meetingItems,
           createdAt: meeting.created_at,
+          agendaVersion: meeting.agenda_version || 1,
           isCompleted: meeting.is_completed
         }
       })
@@ -227,44 +302,57 @@ export const DatabaseService = {
       }
 
       // 获取环节列表
-      const {data: items, error: itemsError} = await supabase
-        .from('meeting_items')
+      let meetingItems: MeetingItem[] = []
+      let hasV2Items = false
+
+      const {data: v2Items, error: v2ItemsError} = await supabase
+        .from('agenda_items_v2')
         .select('*')
         .eq('meeting_id', id)
         .order('order_index', {ascending: true})
 
-      if (itemsError) {
-        console.error('获取环节失败:', itemsError)
-        return null
+      if (v2ItemsError) {
+        console.warn('获取 Agenda V2 环节失败，将回退旧表:', v2ItemsError.message)
+      } else if ((v2Items || []).length > 0) {
+        meetingItems = ((v2Items || []) as DBAgendaItemV2[])
+          .filter((item) => item.deleted_at === null)
+          .map((item) => mapAgendaV2ItemToMeetingItem(item))
+        hasV2Items = true
       }
 
-      // 组装数据
-      const meetingItems: MeetingItem[] = (items || []).map((item) => ({
-        id: item.id,
-        title: item.title,
-        speaker: item.speaker || '',
-        plannedDuration: item.planned_duration,
-        actualDuration: item.actual_duration || undefined,
-        actualStartTime: item.actual_start_time || undefined,
-        actualEndTime: item.actual_end_time || undefined,
-        startTime: item.start_time || undefined,
-        type: item.item_type as MeetingItem['type'],
-        ruleId: item.rule_id,
-        disabled: item.disabled
-      }))
+      if (!hasV2Items) {
+        const {data: legacyItems, error: legacyItemsError} = await supabase
+          .from('meeting_items')
+          .select('*')
+          .eq('meeting_id', id)
+          .order('order_index', {ascending: true})
+
+        if (legacyItemsError) {
+          console.error('获取旧版环节失败:', legacyItemsError)
+          return null
+        }
+
+        meetingItems = ((legacyItems || []) as DBMeetingItem[]).map((item) => mapLegacyItemToMeetingItem(item))
+      }
 
       return {
         id: meeting.id,
         metadata: {
+          clubName: meeting.club_name || undefined,
+          meetingNo: meeting.meeting_no || undefined,
           date: meeting.date || undefined,
           theme: meeting.theme || undefined,
           wordOfTheDay: meeting.word_of_the_day || undefined,
+          timeRange: meeting.time_range || undefined,
           startTime: meeting.start_time || undefined,
+          endTime: meeting.end_time || undefined,
           location: meeting.location || undefined,
+          votingId: meeting.voting_id || undefined,
           meetingLink: meeting.meeting_link || undefined
         },
         items: meetingItems,
         createdAt: meeting.created_at,
+        agendaVersion: meeting.agenda_version || 1,
         isCompleted: meeting.is_completed
       }
     } catch (error) {
@@ -446,6 +534,47 @@ export const DatabaseService = {
       return {success: true}
     } catch (error) {
       console.error('删除会议链接异常:', error)
+      return {success: false, error: error instanceof Error ? error.message : '未知错误'}
+    }
+  },
+
+  /**
+   * 仅更新会议基础信息（不更新 meeting_items，避免整表覆盖）
+   */
+  async updateMeetingMetadata(
+    id: string,
+    metadata: MeetingMetadata,
+    options?: {isCompleted?: boolean}
+  ): Promise<{success: boolean; error?: string}> {
+    try {
+      const payload: Partial<DBMeeting> = {
+        title: metadata.theme || '未命名会议',
+        date: metadata.date || null,
+        theme: metadata.theme || null,
+        word_of_the_day: metadata.wordOfTheDay || null,
+        start_time: metadata.startTime || null,
+        end_time: metadata.endTime || null,
+        time_range: metadata.timeRange || null,
+        location: metadata.location || null,
+        club_name: metadata.clubName || null,
+        meeting_no: metadata.meetingNo || null,
+        voting_id: metadata.votingId || null,
+        meeting_link: metadata.meetingLink || null
+      }
+
+      if (typeof options?.isCompleted === 'boolean') {
+        payload.is_completed = options.isCompleted
+      }
+
+      const {error} = await supabase.from('meetings').update(payload).eq('id', id)
+      if (error) {
+        console.error('更新会议基础信息失败:', error)
+        return {success: false, error: error.message}
+      }
+
+      return {success: true}
+    } catch (error) {
+      console.error('更新会议基础信息异常:', error)
       return {success: false, error: error instanceof Error ? error.message : '未知错误'}
     }
   }

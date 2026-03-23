@@ -1,6 +1,7 @@
 import type {User} from '@supabase/supabase-js'
 import Taro from '@tarojs/taro'
 import {createContext, type ReactNode, useContext, useEffect, useState} from 'react'
+import {AgendaV2DatabaseService} from '@/db/agendaV2Database'
 import {supabase} from '@/client/supabase'
 
 export interface Profile {
@@ -15,6 +16,57 @@ export async function getProfile(userId: string): Promise<Profile | null> {
     return null
   }
   return data
+}
+
+async function syncAgendaIdentityProfile(user: User) {
+  try {
+    const metadata = (user.user_metadata || {}) as Record<string, unknown>
+
+    const nicknameFromWechat =
+      (typeof metadata.nickname === 'string' && metadata.nickname) ||
+      (typeof metadata.wechat_nickname === 'string' && metadata.wechat_nickname) ||
+      null
+    const displayName =
+      nicknameFromWechat ||
+      (typeof metadata.name === 'string' && metadata.name) ||
+      (typeof metadata.full_name === 'string' && metadata.full_name) ||
+      (user.email ? user.email.split('@')[0] : null) ||
+      '微信用户'
+
+    const avatarUrl =
+      (typeof metadata.avatar_url === 'string' && metadata.avatar_url) ||
+      (typeof metadata.picture === 'string' && metadata.picture) ||
+      null
+
+    const wechatOpenId =
+      (typeof metadata.wechat_openid === 'string' && metadata.wechat_openid) ||
+      (typeof metadata.openid === 'string' && metadata.openid) ||
+      null
+    const wechatUnionId =
+      (typeof metadata.wechat_unionid === 'string' && metadata.wechat_unionid) ||
+      (typeof metadata.unionid === 'string' && metadata.unionid) ||
+      null
+
+    const nameSource = nicknameFromWechat ? 'wechat_profile' : 'unknown'
+    const appId = (process.env.TARO_APP_WECHAT_APP_ID || process.env.TARO_APP_APP_ID || 'toamaster_app') as string
+
+    const result = await AgendaV2DatabaseService.upsertUserIdentityProfile({
+      user_id: user.id,
+      app_id: appId,
+      wechat_openid: wechatOpenId,
+      wechat_unionid: wechatUnionId,
+      display_name: displayName,
+      avatar_url: avatarUrl,
+      name_source: nameSource,
+      profile_completed: Boolean(displayName && displayName !== '微信用户')
+    })
+
+    if (!result.success) {
+      console.warn('同步用户身份资料失败:', result.error)
+    }
+  } catch (error) {
+    console.warn('同步用户身份资料异常:', error)
+  }
 }
 
 interface AuthContextType {
@@ -54,6 +106,7 @@ export function AuthProvider({children}: {children: ReactNode}) {
       .then(({data: {session}}) => {
         setUser(session?.user ?? null)
         if (session?.user) {
+          void syncAgendaIdentityProfile(session.user)
           getProfile(session.user.id).then(setProfile)
         }
         setLoading(false)
@@ -71,6 +124,7 @@ export function AuthProvider({children}: {children: ReactNode}) {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null)
       if (session?.user) {
+        void syncAgendaIdentityProfile(session.user)
         getProfile(session.user.id).then(setProfile)
       } else {
         setProfile(null)
@@ -158,15 +212,42 @@ export function AuthProvider({children}: {children: ReactNode}) {
 
       // Get WeChat login code
       const loginResult = await Taro.login()
+      if (!loginResult?.code) {
+        throw new Error('微信登录失败：未获取到 code')
+      }
+
+      // 显式拉取微信昵称/头像，用于“谁修改了议程”的可追溯展示
+      let profilePayload: {nickname?: string; avatarUrl?: string} | null = null
+      try {
+        const profileResult = await Taro.getUserProfile({
+          desc: '用于记录会议操作人昵称与头像'
+        })
+        profilePayload = {
+          nickname: profileResult?.userInfo?.nickName || undefined,
+          avatarUrl: profileResult?.userInfo?.avatarUrl || undefined
+        }
+      } catch (profileError) {
+        throw new Error(
+          `需要授权微信昵称后才能登录：${
+            profileError instanceof Error ? profileError.message : '未授权获取昵称头像'
+          }`
+        )
+      }
 
       // Call backend Edge Function for login
       const {data, error} = await supabase.functions.invoke('wechat-miniprogram-login', {
-        body: {code: loginResult?.code}
+        body: {
+          code: loginResult.code,
+          profile: profilePayload
+        }
       })
 
       if (error) {
         const errorMsg = (await error?.context?.text?.()) || error.message
         throw new Error(errorMsg)
+      }
+      if (!data?.token) {
+        throw new Error('微信登录失败：后端未返回 token')
       }
 
       // Verify OTP token

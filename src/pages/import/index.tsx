@@ -1,6 +1,7 @@
 import {Text, Textarea, View} from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import {useRef, useState} from 'react'
+import {AgendaV2DatabaseService} from '../../db/agendaV2Database'
 import {DatabaseService} from '../../db/database'
 import {StorageService} from '../../services/storage'
 import {useMeetingStore} from '../../store/meetingStore'
@@ -250,8 +251,18 @@ export default function ImportPage() {
         return
       }
 
-      StorageService.saveSession(newSession, {syncToCloud: false})
-      setCurrentSession(newSession)
+      const bootstrapResult = await AgendaV2DatabaseService.bootstrapAgendaFromSession(newSession)
+      if (!bootstrapResult.success) {
+        console.warn('导入会议后初始化 Agenda V2 失败:', bootstrapResult.error)
+      }
+
+      const versionedSession: MeetingSession = {
+        ...newSession,
+        agendaVersion: bootstrapResult.data?.agendaVersion || newSession.agendaVersion || 1
+      }
+
+      StorageService.saveSession(versionedSession, {syncToCloud: false})
+      setCurrentSession(versionedSession)
 
       Taro.showToast({title: '会议已保存', icon: 'success', duration: 1500})
       setTimeout(() => {
