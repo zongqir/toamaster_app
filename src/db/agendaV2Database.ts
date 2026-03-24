@@ -1,20 +1,19 @@
 import {supabase} from '../client/supabase'
-import type {MeetingSession} from '../types/meeting'
 import type {
-  AgendaOpInput,
   AgendaItemV2,
   AgendaMutationActor,
+  AgendaOpInput,
   AgendaOpV2,
-  ApplyAgendaOpsResult,
   AgendaServiceResult,
   AhCounterRecordV2,
+  ApplyAgendaOpsResult,
   GrammarianNoteV2,
   MeetingLiveCursorV2,
   MeetingParticipantV2,
   MeetingRole,
-  MeetingRoleAssignmentV2,
   UserIdentityProfileV2
 } from '../types/agendaV2'
+import type {MeetingSession} from '../types/meeting'
 
 const UNKNOWN_ACTOR_NAME = '未知用户'
 

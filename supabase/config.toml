@@ -17,5 +17,3 @@ enabled = true
 port = 54323
 api_url = "https://backend.appmiaoda.com"
 
-[functions]
-enabled = true
