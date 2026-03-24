@@ -22,7 +22,7 @@ cd aactp-timer
 
 ## 🛠️ 本地环境准备
 
-### 1. 安装 Node.js
+### 1. 安装 Node.js 和 pnpm
 
 - 访问：https://nodejs.org/
 - 下载并安装 LTS 版本（推荐 18.x 或 20.x）
@@ -33,12 +33,19 @@ node --version
 npm --version
 ```
 
+- 安装 pnpm（项目使用 pnpm 作为包管理器，**不要使用 npm/yarn**）：
+
+```bash
+npm install -g pnpm
+pnpm --version
+```
+
 ### 2. 安装项目依赖
 
 在项目根目录打开终端（命令行），执行：
 
 ```bash
-npm install
+pnpm install
 ```
 
 这会安装所有必需的依赖包，可能需要几分钟时间。
@@ -51,10 +58,10 @@ npm install
 
 ```bash
 # 开发模式（支持热更新，推荐开发时使用）
-npm run dev:weapp
+pnpm run dev:weapp
 
 # 生产模式（优化后的代码，推荐发布时使用）
-npm run build:weapp
+pnpm run build:weapp
 ```
 
 **注意**：如果命令提示不支持，请检查 `package.json` 中的 scripts 配置。
@@ -147,10 +154,10 @@ dist/
 
 ```bash
 # 开发模式
-npm run dev:h5
+pnpm run dev:h5
 
 # 生产模式
-npm run build:h5
+pnpm run build:h5
 ```
 
 编译后的文件在 `dist` 目录，可以部署到：
@@ -202,7 +209,7 @@ npm run build:h5
 
 ### 3. 上传代码
 
-1. 确保代码已经编译（`npm run build:weapp`）
+1. 确保代码已经编译（`pnpm run build:weapp`）
 2. 在微信开发者工具中点击右上角"上传"按钮
 3. 填写版本信息：
    - **版本号**：1.0.0
@@ -248,19 +255,19 @@ npm run build:h5
 
 ## 🔍 常见问题排查
 
-### 问题 1：npm install 失败
+### 问题 1：pnpm install 失败
 
 **解决方案**：
 
 ```bash
 # 清除缓存
-npm cache clean --force
+pnpm store prune
 
 # 使用国内镜像
-npm config set registry https://registry.npmmirror.com
+pnpm config set registry https://registry.npmmirror.com
 
 # 重新安装
-npm install
+pnpm install
 ```
 
 ### 问题 2：编译失败
@@ -277,10 +284,10 @@ npm install
 rm -rf node_modules dist
 
 # 重新安装依赖
-npm install
+pnpm install
 
 # 重新编译
-npm run build:weapp
+pnpm run build:weapp
 ```
 
 ### 问题 3：微信开发者工具无法导入
@@ -291,7 +298,7 @@ npm run build:weapp
 3. 是否已经编译过代码
 
 **解决方案**：
-1. 确保先运行 `npm run build:weapp`
+1. 确保先运行 `pnpm run build:weapp`
 2. 确认 `dist` 目录存在且包含编译后的文件
 3. 重新导入项目
 
@@ -336,8 +343,9 @@ npm run build:weapp
 部署前请确认：
 
 - [ ] Node.js 已安装（18.x 或 20.x）
-- [ ] 项目依赖已安装（`npm install`）
-- [ ] 代码已编译（`npm run build:weapp`）
+- [ ] pnpm 已安装（`npm install -g pnpm`）
+- [ ] 项目依赖已安装（`pnpm install`）
+- [ ] 代码已编译（`pnpm run build:weapp`）
 - [ ] `dist` 目录存在且包含编译后的文件
 - [ ] 微信开发者工具已安装
 - [ ] 项目已在微信开发者工具中成功导入

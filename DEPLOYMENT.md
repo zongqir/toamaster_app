@@ -21,10 +21,10 @@
 
 ```bash
 # 开发模式（支持热更新）
-npm run dev:weapp
+pnpm run dev:weapp
 
 # 或者生产模式（优化后的代码）
-npm run build:weapp
+pnpm run build:weapp
 ```
 
 编译完成后，代码会输出到 `dist` 目录。
@@ -81,7 +81,7 @@ npm run build:weapp
 
 ```bash
 # 编译 H5 版本
-npm run build:h5
+pnpm run build:h5
 ```
 
 编译后的文件在 `dist` 目录，可以部署到任何静态网站托管服务：

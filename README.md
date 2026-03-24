@@ -39,14 +39,24 @@
 
 ## 🚀 快速开始
 
+### 前置要求
+
+- Node.js 18.x 或 20.x（推荐）
+- pnpm 包管理器（项目使用 pnpm，**不要用 npm/yarn**）
+
+安装 pnpm（如果尚未安装）：
+```bash
+npm install -g pnpm
+```
+
 ### 方法 1：编译为微信小程序（推荐）
 
 ```bash
 # 1. 安装依赖（首次运行）
-npm install
+pnpm install
 
 # 2. 编译小程序
-npm run build:weapp
+pnpm run build:weapp
 
 # 或使用快速脚本
 ./build-weapp.sh
@@ -64,10 +74,10 @@ npm run build:weapp
 
 ```bash
 # 编译 H5 版本
-npm run build:h5
+pnpm run build:h5
 
 # 开发模式（支持热更新）
-npm run dev:h5
+pnpm run dev:h5
 ```
 
 编译后的文件在 `dist` 目录，可以部署到任何静态网站托管服务。
@@ -174,22 +184,22 @@ src/
 
 ```bash
 # 安装依赖
-npm install
+pnpm install
 
 # 开发模式 - 微信小程序
-npm run dev:weapp
+pnpm run dev:weapp
 
 # 开发模式 - H5
-npm run dev:h5
+pnpm run dev:h5
 
 # 生产构建 - 微信小程序
-npm run build:weapp
+pnpm run build:weapp
 
 # 生产构建 - H5
-npm run build:h5
+pnpm run build:h5
 
 # 代码检查和格式化
-npm run lint
+pnpm run lint
 ```
 
 ## 📝 注意事项

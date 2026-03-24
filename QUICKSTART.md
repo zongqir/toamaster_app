@@ -9,7 +9,7 @@
 
 ## 🚀 三步部署
 
-### 第 1 步：安装 Node.js
+### 第 1 步：安装 Node.js 和 pnpm
 
 1. 访问：https://nodejs.org/
 2. 下载并安装 LTS 版本
@@ -17,6 +17,11 @@
    ```bash
    node --version
    # 应该显示：v18.x.x 或 v20.x.x
+   ```
+4. 安装 pnpm（项目使用 pnpm 作为包管理器）：
+   ```bash
+   npm install -g pnpm
+   pnpm --version
    ```
 
 ### 第 2 步：编译小程序代码
@@ -28,11 +33,11 @@
    ```
 3. 安装依赖：
    ```bash
-   npm install
+   pnpm install
    ```
 4. 编译代码：
    ```bash
-   npm run build:weapp
+   pnpm run build:weapp
    ```
 5. 等待编译完成，代码会输出到 `dist` 目录
 
@@ -66,12 +71,12 @@
 
 ## ❓ 遇到问题？
 
-### 问题 1：npm install 很慢
+### 问题 1：pnpm install 很慢
 
 使用国内镜像：
 ```bash
-npm config set registry https://registry.npmmirror.com
-npm install
+pnpm config set registry https://registry.npmmirror.com
+pnpm install
 ```
 
 ### 问题 2：编译失败
@@ -87,7 +92,7 @@ node --version
 ### 问题 3：微信开发者工具无法导入
 
 确保：
-1. 已经运行过 `npm run build:weapp`
+1. 已经运行过 `pnpm run build:weapp`
 2. `dist` 目录存在
 3. 选择的是 `dist` 目录，不是项目根目录
 
