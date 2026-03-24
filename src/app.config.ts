@@ -3,6 +3,7 @@ const pages = [
   'pages/import/index',
   'pages/timeline/index',
   'pages/timer/index',
+  'pages/officer-notes/index',
   'pages/settings/index',
   'pages/vote-entrance/index',
   'pages/vote-edit/index',

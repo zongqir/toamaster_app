@@ -1,9 +1,10 @@
 import {Button, ScrollView, Text, View} from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import {type ReactNode, useEffect, useState} from 'react'
+import {type ReactNode, useEffect, useMemo, useState} from 'react'
 import {VotingDatabaseService} from '../db/votingDatabase'
 import type {MeetingItem} from '../types/meeting'
 import type {VotingResult} from '../types/voting'
+import {classifyTimingReport} from '../utils/timingReport'
 
 interface MeetingStatsProps {
   items: MeetingItem[]
@@ -25,9 +26,11 @@ interface SpeakerStats {
   totalActual: number
   itemCount: number
   overtimeCount: number
+  severeOvertimeCount: number
   ontimeCount: number
   undertimeCount: number
   items: Array<{
+    itemId: string
     title: string
     planned: number
     actual: number
@@ -39,6 +42,7 @@ interface OvertimeItem {
   speaker: string
   title: string
   overtime: number
+  severe: boolean
 }
 
 interface UndertimeItem {
@@ -143,8 +147,12 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
     text += `实际总时长：${formatDuration(totalActual)}\n`
     text += `时间差异：${formatDiff(totalActual - totalPlanned)}\n`
     text += `超时环节：${overtimeItems.length} 个\n`
+    text += `严重超时：${severeOvertimeItems.length} 个\n`
     text += `准时环节：${ontimeItems.length} 个\n`
     text += `提前环节：${undertimeItems.length} 个\n\n`
+    text += '判定口径：\n'
+    text += '- 准时：5分钟以上环节允许提前60秒内；5分钟及以下环节允许提前30秒内。\n'
+    text += '- 超时：超过计划时长即超时；超过30秒计为严重超时。\n\n'
 
     // 超时统计
     const overtimeItemsList: OvertimeItem[] = []
@@ -190,7 +198,7 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
       text += `   计划时长：${formatDuration(stats.totalPlanned)}\n`
       text += `   实际时长：${formatDuration(stats.totalActual)}\n`
       text += `   时间差异：${formatDiff(stats.totalActual - stats.totalPlanned)}\n`
-      text += `   超时：${stats.overtimeCount} | 准时：${stats.ontimeCount} | 提前：${stats.undertimeCount}\n\n`
+      text += `   超时：${stats.overtimeCount}（严重 ${stats.severeOvertimeCount}） | 准时：${stats.ontimeCount} | 提前：${stats.undertimeCount}\n\n`
     })
 
     text += '━━━━━━━━━━━━━━━━━━━━\n'
@@ -209,87 +217,116 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
     })
   }
 
-  const activeItems = items.filter((i) => !i.disabled && i.actualDuration !== undefined)
+  const activeItems = useMemo(() => items.filter((i) => !i.disabled && i.actualDuration !== undefined), [items])
 
-  // 计算整体统计
-  const totalPlanned = activeItems.reduce((sum, i) => sum + i.plannedDuration, 0)
-  const totalActual = activeItems.reduce((sum, i) => sum + (i.actualDuration || 0), 0)
-  const overtimeItems = activeItems.filter((i) => (i.actualDuration || 0) > i.plannedDuration)
-  const ontimeItems = activeItems.filter((i) => (i.actualDuration || 0) === i.plannedDuration)
-  const undertimeItems = activeItems.filter((i) => (i.actualDuration || 0) < i.plannedDuration)
+  const {
+    totalPlanned,
+    totalActual,
+    overtimeItems,
+    severeOvertimeItems,
+    ontimeItems,
+    undertimeItems,
+    speakerStats,
+    overtimeBySpeaker,
+    undertimeBySpeaker
+  } = useMemo(() => {
+    const speakerStatsMap = new Map<string, SpeakerStats>()
+    const overtimeItemsAcc: MeetingItem[] = []
+    const severeOvertimeItemsAcc: MeetingItem[] = []
+    const ontimeItemsAcc: MeetingItem[] = []
+    const undertimeItemsAcc: MeetingItem[] = []
+    const overtimeBySpeakerMap = new Map<string, OvertimeItem[]>()
+    const undertimeBySpeakerMap = new Map<string, UndertimeItem[]>()
 
-  // 按负责人分组统计
-  const speakerStatsMap = new Map<string, SpeakerStats>()
-  activeItems.forEach((item) => {
-    const speaker = item.speaker || '未指定'
-    if (!speakerStatsMap.has(speaker)) {
-      speakerStatsMap.set(speaker, {
-        speaker,
-        totalPlanned: 0,
-        totalActual: 0,
-        itemCount: 0,
-        overtimeCount: 0,
-        ontimeCount: 0,
-        undertimeCount: 0,
-        items: []
+    let plannedSum = 0
+    let actualSum = 0
+
+    activeItems.forEach((item) => {
+      const speaker = item.speaker || '未指定'
+      const actual = item.actualDuration || 0
+      const diff = actual - item.plannedDuration
+      const category = classifyTimingReport(item.plannedDuration, actual)
+
+      plannedSum += item.plannedDuration
+      actualSum += actual
+
+      let stats = speakerStatsMap.get(speaker)
+      if (!stats) {
+        stats = {
+          speaker,
+          totalPlanned: 0,
+          totalActual: 0,
+          itemCount: 0,
+          overtimeCount: 0,
+          severeOvertimeCount: 0,
+          ontimeCount: 0,
+          undertimeCount: 0,
+          items: []
+        }
+        speakerStatsMap.set(speaker, stats)
+      }
+      stats.totalPlanned += item.plannedDuration
+      stats.totalActual += actual
+      stats.itemCount += 1
+
+      if (category === 'severe_overtime') {
+        stats.overtimeCount += 1
+        stats.severeOvertimeCount += 1
+        severeOvertimeItemsAcc.push(item)
+        overtimeItemsAcc.push(item)
+      } else if (category === 'overtime') {
+        stats.overtimeCount += 1
+        overtimeItemsAcc.push(item)
+      } else if (category === 'on_time') {
+        stats.ontimeCount += 1
+        ontimeItemsAcc.push(item)
+      } else if (category === 'undertime') {
+        stats.undertimeCount += 1
+        undertimeItemsAcc.push(item)
+      }
+
+      stats.items.push({
+        itemId: item.id,
+        title: item.title,
+        planned: item.plannedDuration,
+        actual,
+        diff
       })
-    }
-    const stats = speakerStatsMap.get(speaker)!
-    const actual = item.actualDuration || 0
-    const diff = actual - item.plannedDuration
 
-    stats.totalPlanned += item.plannedDuration
-    stats.totalActual += actual
-    stats.itemCount += 1
-    if (diff > 0) stats.overtimeCount += 1
-    else if (diff === 0) stats.ontimeCount += 1
-    else stats.undertimeCount += 1
-
-    stats.items.push({
-      title: item.title,
-      planned: item.plannedDuration,
-      actual,
-      diff
+      if (category === 'overtime' || category === 'severe_overtime') {
+        if (!overtimeBySpeakerMap.has(speaker)) {
+          overtimeBySpeakerMap.set(speaker, [])
+        }
+        overtimeBySpeakerMap.get(speaker)?.push({
+          speaker,
+          title: item.title,
+          overtime: diff,
+          severe: category === 'severe_overtime'
+        })
+      } else if (category === 'undertime') {
+        if (!undertimeBySpeakerMap.has(speaker)) {
+          undertimeBySpeakerMap.set(speaker, [])
+        }
+        undertimeBySpeakerMap.get(speaker)?.push({
+          speaker,
+          title: item.title,
+          undertime: Math.abs(diff)
+        })
+      }
     })
-  })
 
-  const speakerStats = Array.from(speakerStatsMap.values())
-
-  // 超时统计：按负责人分组
-  const overtimeBySpeaker = new Map<string, OvertimeItem[]>()
-  activeItems.forEach((item) => {
-    const actual = item.actualDuration || 0
-    const diff = actual - item.plannedDuration
-    if (diff > 0) {
-      const speaker = item.speaker || '未指定'
-      if (!overtimeBySpeaker.has(speaker)) {
-        overtimeBySpeaker.set(speaker, [])
-      }
-      overtimeBySpeaker.get(speaker)?.push({
-        speaker,
-        title: item.title,
-        overtime: diff
-      })
+    return {
+      totalPlanned: plannedSum,
+      totalActual: actualSum,
+      overtimeItems: overtimeItemsAcc,
+      severeOvertimeItems: severeOvertimeItemsAcc,
+      ontimeItems: ontimeItemsAcc,
+      undertimeItems: undertimeItemsAcc,
+      speakerStats: Array.from(speakerStatsMap.values()),
+      overtimeBySpeaker: overtimeBySpeakerMap,
+      undertimeBySpeaker: undertimeBySpeakerMap
     }
-  })
-
-  // 提前统计：按负责人分组
-  const undertimeBySpeaker = new Map<string, UndertimeItem[]>()
-  activeItems.forEach((item) => {
-    const actual = item.actualDuration || 0
-    const diff = item.plannedDuration - actual
-    if (diff > 0) {
-      const speaker = item.speaker || '未指定'
-      if (!undertimeBySpeaker.has(speaker)) {
-        undertimeBySpeaker.set(speaker, [])
-      }
-      undertimeBySpeaker.get(speaker)?.push({
-        speaker,
-        title: item.title,
-        undertime: diff
-      })
-    }
-  })
+  }, [activeItems])
 
   const formatDuration = (sec: number) => {
     const m = Math.floor(sec / 60)
@@ -359,10 +396,15 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
                   </View>
                 </View>
 
-                <View className="mt-4 pt-4 border-t border-border/30 flex justify-around">
+                <View
+                  className={`mt-4 pt-4 border-t border-border/30 grid ${isCompact ? 'grid-cols-2' : 'grid-cols-4'} gap-2`}>
                   <View className="text-center">
                     <Text className="text-2xl font-bold text-red-500 block">{overtimeItems.length}</Text>
                     <Text className="text-sm text-foreground/90">超时</Text>
+                  </View>
+                  <View className="text-center">
+                    <Text className="text-2xl font-bold text-fuchsia-400 block">{severeOvertimeItems.length}</Text>
+                    <Text className="text-sm text-foreground/90">严重超时</Text>
                   </View>
                   <View className="text-center">
                     <Text className="text-2xl font-bold text-primary block">{ontimeItems.length}</Text>
@@ -373,6 +415,9 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
                     <Text className="text-sm text-foreground/90">提前</Text>
                   </View>
                 </View>
+                <Text className="text-[11px] text-muted-foreground mt-3 block leading-5">
+                  准时口径：5 分钟以上允许提前 60 秒内，5 分钟及以下允许提前 30 秒内。超时超过 30 秒计为严重超时。
+                </Text>
               </View>
             )}
           </View>
@@ -407,10 +452,16 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
                           </View>
                         </View>
                         <View className="space-y-1.5">
-                          {items.map((item, idx) => (
-                            <View key={idx} className="flex justify-between items-center pl-2">
+                          {items.map((item) => (
+                            <View
+                              key={`${item.speaker}-${item.title}-${item.overtime}-${item.severe ? '1' : '0'}`}
+                              className="flex justify-between items-center pl-2">
                               <Text className="text-sm text-foreground/88 flex-1 truncate">• {item.title}</Text>
-                              <Text className="text-sm font-bold text-red-500">+{formatDuration(item.overtime)}</Text>
+                              <Text
+                                className={`text-sm font-bold ${item.severe ? 'text-fuchsia-400' : 'text-red-500'}`}>
+                                +{formatDuration(item.overtime)}
+                                {item.severe ? '（严重）' : ''}
+                              </Text>
                             </View>
                           ))}
                         </View>
@@ -454,8 +505,10 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
                           </View>
                         </View>
                         <View className="space-y-1.5">
-                          {items.map((item, idx) => (
-                            <View key={idx} className="flex justify-between items-center pl-2">
+                          {items.map((item) => (
+                            <View
+                              key={`${item.speaker}-${item.title}-${item.undertime}`}
+                              className="flex justify-between items-center pl-2">
                               <Text className="text-sm text-foreground/88 flex-1 truncate">• {item.title}</Text>
                               <Text className="text-sm font-bold text-green-500">
                                 -{formatDuration(item.undertime)}
@@ -515,7 +568,7 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
                       </View>
                     </View>
 
-                    <View className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-3'} gap-2 mb-3`}>
+                    <View className={`grid ${isCompact ? 'grid-cols-2' : 'grid-cols-4'} gap-2 mb-3`}>
                       <View
                         className={`rounded-full border px-2 py-1 text-center ${
                           stats.overtimeCount > 0
@@ -525,6 +578,17 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
                         <Text
                           className={`text-xs font-semibold ${stats.overtimeCount > 0 ? 'text-red-400' : 'text-foreground/70'}`}>
                           超时 {stats.overtimeCount}
+                        </Text>
+                      </View>
+                      <View
+                        className={`rounded-full border px-2 py-1 text-center ${
+                          stats.severeOvertimeCount > 0
+                            ? 'bg-fuchsia-500/12 border-fuchsia-500/35'
+                            : 'bg-secondary/30 border-border/40'
+                        }`}>
+                        <Text
+                          className={`text-xs font-semibold ${stats.severeOvertimeCount > 0 ? 'text-fuchsia-400' : 'text-foreground/70'}`}>
+                          严重 {stats.severeOvertimeCount}
                         </Text>
                       </View>
                       <View
@@ -551,8 +615,8 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
 
                     {/* 详细环节列表 */}
                     <View className="pt-3 border-t border-border/30 space-y-2">
-                      {stats.items.map((item, idx) => (
-                        <View key={idx} className="flex justify-between items-center">
+                      {stats.items.map((item) => (
+                        <View key={item.itemId} className="flex justify-between items-center">
                           <Text className="text-sm text-foreground/88 flex-1 truncate">{item.title}</Text>
                           <View className="flex items-center gap-2">
                             <Text className="text-sm text-foreground/82">{formatDuration(item.actual)}</Text>

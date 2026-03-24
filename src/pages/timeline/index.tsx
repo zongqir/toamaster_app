@@ -958,6 +958,22 @@ export default function TimelinePage() {
               <View className="i-mdi-undo text-base text-foreground" />
               <Text className="text-xs font-semibold text-foreground">返回</Text>
             </View>
+            <View
+              className={`h-10 px-3 rounded-lg flex items-center gap-1.5 border ${
+                showStats
+                  ? 'bg-primary border-primary/60 active:bg-primary/85'
+                  : 'bg-secondary/70 border-border/70 active:bg-secondary/85'
+              }`}
+              onClick={() => setShowStats(!showStats)}>
+              <View
+                className={`i-mdi-${showStats ? 'format-list-bulleted' : 'chart-bar'} text-base ${
+                  showStats ? 'text-white' : 'text-foreground'
+                }`}
+              />
+              <Text className={`text-xs font-semibold ${showStats ? 'text-white' : 'text-foreground'}`}>
+                {showStats ? '列表' : '统计'}
+              </Text>
+            </View>
             {isCompleted && (
               <>
                 <View
@@ -965,22 +981,6 @@ export default function TimelinePage() {
                   onClick={handleResetMeeting}>
                   <View className="i-mdi-refresh text-base text-amber-400" />
                   <Text className="text-xs font-semibold text-amber-300">重置</Text>
-                </View>
-                <View
-                  className={`h-10 px-3 rounded-lg flex items-center gap-1.5 border ${
-                    showStats
-                      ? 'bg-primary border-primary/60 active:bg-primary/85'
-                      : 'bg-secondary/70 border-border/70 active:bg-secondary/85'
-                  }`}
-                  onClick={() => setShowStats(!showStats)}>
-                  <View
-                    className={`i-mdi-${showStats ? 'format-list-bulleted' : 'chart-bar'} text-base ${
-                      showStats ? 'text-white' : 'text-foreground'
-                    }`}
-                  />
-                  <Text className={`text-xs font-semibold ${showStats ? 'text-white' : 'text-foreground'}`}>
-                    {showStats ? '列表' : '统计'}
-                  </Text>
                 </View>
                 <View
                   className="h-10 px-3 rounded-lg flex items-center gap-1.5 border border-primary/60 bg-primary active:bg-primary/85"
@@ -1079,7 +1079,7 @@ export default function TimelinePage() {
         )}
       </View>
 
-      {showStats && isCompleted ? (
+      {showStats ? (
         <View className="flex-1">
           <MeetingStats
             items={items}
@@ -1090,9 +1090,16 @@ export default function TimelinePage() {
               <View className="space-y-2">
                 <View className="ui-card p-3 border-primary/30">
                   <Text className="text-sm font-medium text-foreground block text-center">
-                    📊 查看会议统计数据和超时分析
+                    {isCompleted ? '📊 查看会议统计数据和超时分析' : '📊 会议进行中：实时统计已开启'}
                   </Text>
                 </View>
+                {!isCompleted && (
+                  <View className="ui-muted-panel">
+                    <Text className="text-sm text-muted-foreground text-center">
+                      可提前查看统计，不必等会议结束。数据会随当前记录实时刷新。
+                    </Text>
+                  </View>
+                )}
 
                 <View className="flex flex-wrap gap-2">
                   <View

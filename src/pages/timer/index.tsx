@@ -11,13 +11,15 @@ import {useMeetingStore} from '../../store/meetingStore'
 import type {AgendaOpInput} from '../../types/agendaV2'
 import type {MeetingItem, MeetingSession} from '../../types/meeting'
 import {generateId} from '../../utils/id'
-import {safeSwitchTab} from '../../utils/safeNavigation'
+import {safeNavigateTo, safeSwitchTab} from '../../utils/safeNavigation'
+import {classifyTimingReport} from '../../utils/timingReport'
 
 export default function TimerPage() {
   const {currentSession, settings, setCurrentSession} = useMeetingStore()
   const [_isCompleted, setIsCompleted] = useState(false)
   const [showRemainingItems, setShowRemainingItems] = useState(false)
   const [showOperationTips, setShowOperationTips] = useState(false)
+  const [showLiveStats, setShowLiveStats] = useState(false)
   const [showEditDialog, setShowEditDialog] = useState(false)
   const [showAddDialog, setShowAddDialog] = useState(false)
   const [editTitle, setEditTitle] = useState('')
@@ -217,7 +219,6 @@ export default function TimerPage() {
   const {
     currentIndex,
     currentItem,
-    nextItem,
     elapsed,
     remaining,
     isRunning,
@@ -844,6 +845,57 @@ export default function TimerPage() {
     }
   }, [status, isRunning])
 
+  const liveStats = useMemo(() => {
+    const currentItemHasTiming = Boolean(
+      currentItem?.actualDuration !== undefined ||
+        currentItem?.actualStartTime !== undefined ||
+        currentItem?.actualEndTime !== undefined ||
+        isRunning ||
+        elapsed > 0
+    )
+
+    const snapshotItems = activeItems.map((item, index) => {
+      if (index !== currentIndex) return item
+      if (!currentItemHasTiming) return item
+      return {
+        ...item,
+        actualDuration: elapsed
+      }
+    })
+
+    const counters = {
+      onTime: 0,
+      overtime: 0,
+      severeOvertime: 0,
+      undertime: 0,
+      pending: 0
+    }
+    let totalPlanned = 0
+    let totalActual = 0
+
+    snapshotItems.forEach((item) => {
+      totalPlanned += item.plannedDuration
+      if (item.actualDuration === undefined) {
+        counters.pending += 1
+        return
+      }
+
+      totalActual += item.actualDuration
+      const category = classifyTimingReport(item.plannedDuration, item.actualDuration)
+      if (category === 'on_time') counters.onTime += 1
+      if (category === 'overtime') counters.overtime += 1
+      if (category === 'severe_overtime') counters.severeOvertime += 1
+      if (category === 'undertime') counters.undertime += 1
+    })
+
+    return {
+      ...counters,
+      totalPlanned,
+      totalActual,
+      totalDiff: totalActual - totalPlanned
+    }
+  }, [activeItems, currentIndex, currentItem?.actualDuration, currentItem?.actualEndTime, currentItem?.actualStartTime, elapsed, isRunning])
+
   const {windowHeight, windowWidth} = useMemo(() => {
     try {
       const info = Taro.getSystemInfoSync()
@@ -946,10 +998,38 @@ export default function TimerPage() {
             <View className={`${isCompact ? 'mb-2' : 'mb-3'} flex items-center justify-center`}>
               <View
                 className={`${isCompact ? 'h-8 px-3 gap-1.5' : 'h-9 px-3.5 gap-2'} ui-btn-secondary rounded-full flex items-center`}
+                onClick={() => void safeNavigateTo('/pages/officer-notes/index')}>
+                <View className={`${isCompact ? 'text-xs' : 'text-sm'} i-mdi-account-group-outline text-foreground`} />
+                <Text className={`${isCompact ? 'text-[11px]' : 'text-xs'} font-semibold text-foreground`}>
+                  官员记录（语法/哼哈）
+                </Text>
+              </View>
+            </View>
+
+            <View className={`${isCompact ? 'mb-2' : 'mb-3'} flex items-center justify-center`}>
+              <View
+                className={`${isCompact ? 'h-8 px-3 gap-1.5' : 'h-9 px-3.5 gap-2'} ui-btn-secondary rounded-full flex items-center`}
                 onClick={() => setShowOperationTips((prev) => !prev)}>
                 <View className={`${isCompact ? 'text-xs' : 'text-sm'} i-mdi-information-outline text-foreground`} />
                 <Text className={`${isCompact ? 'text-[11px]' : 'text-xs'} font-semibold text-foreground`}>
                   {showOperationTips ? '收起说明' : '展开说明'}
+                </Text>
+              </View>
+            </View>
+
+            <View className={`${isCompact ? 'mb-2' : 'mb-3'} flex items-center justify-center`}>
+              <View
+                className={`${isCompact ? 'h-8 px-3 gap-1.5' : 'h-9 px-3.5 gap-2'} ${
+                  showLiveStats ? 'ui-btn-primary' : 'ui-btn-secondary'
+                } rounded-full flex items-center`}
+                onClick={() => setShowLiveStats((prev) => !prev)}>
+                <View
+                  className={`${isCompact ? 'text-xs' : 'text-sm'} i-mdi-chart-box-outline ${
+                    showLiveStats ? 'text-white' : 'text-foreground'
+                  }`}
+                />
+                <Text className={`${isCompact ? 'text-[11px]' : 'text-xs'} font-semibold ${showLiveStats ? 'text-white' : 'text-foreground'}`}>
+                  {showLiveStats ? '收起统计' : '实时统计'}
                 </Text>
               </View>
             </View>
@@ -1059,6 +1139,42 @@ export default function TimerPage() {
                     className={`${isNarrowLayout ? 'text-xs' : 'text-[11px]'} text-white/75 leading-[1.65] break-words`}>
                     快速校时：只改当前已用时/剩余时长，不改计划时长。
                   </View>
+                </View>
+              </View>
+            )}
+
+            {showLiveStats && (
+              <View className={`ui-panel-sharp mb-3 px-4 ${isNarrowLayout ? 'py-3.5' : 'py-3'}`}>
+                <Text className={`${isNarrowLayout ? 'text-xs' : 'text-[11px]'} font-semibold text-white/88 block`}>
+                  实时统计（可随时切换）
+                </Text>
+                <View className="grid grid-cols-2 gap-2 mt-2">
+                  <View className="rounded-lg border border-green-500/35 bg-green-500/10 px-2 py-1.5">
+                    <Text className="text-[11px] text-green-200 block">准时</Text>
+                    <Text className="text-sm font-bold text-green-100">{liveStats.onTime}</Text>
+                  </View>
+                  <View className="rounded-lg border border-red-500/35 bg-red-500/10 px-2 py-1.5">
+                    <Text className="text-[11px] text-red-200 block">超时</Text>
+                    <Text className="text-sm font-bold text-red-100">{liveStats.overtime}</Text>
+                  </View>
+                  <View className="rounded-lg border border-fuchsia-500/35 bg-fuchsia-500/10 px-2 py-1.5">
+                    <Text className="text-[11px] text-fuchsia-200 block">严重超时</Text>
+                    <Text className="text-sm font-bold text-fuchsia-100">{liveStats.severeOvertime}</Text>
+                  </View>
+                  <View className="rounded-lg border border-amber-500/35 bg-amber-500/10 px-2 py-1.5">
+                    <Text className="text-[11px] text-amber-200 block">待完成</Text>
+                    <Text className="text-sm font-bold text-amber-100">{liveStats.pending}</Text>
+                  </View>
+                </View>
+                <View className="flex items-center justify-between mt-2">
+                  <Text className="text-[11px] text-white/75">累计偏差</Text>
+                  <Text
+                    className={`text-xs font-semibold ${
+                      liveStats.totalDiff > 0 ? 'text-red-200' : liveStats.totalDiff < 0 ? 'text-green-200' : 'text-white/90'
+                    }`}>
+                    {liveStats.totalDiff > 0 ? '+' : ''}
+                    {formatTime(liveStats.totalDiff)}
+                  </Text>
                 </View>
               </View>
             )}
