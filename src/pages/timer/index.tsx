@@ -2,8 +2,8 @@ import {Button, Input, Picker, ScrollView, Text, View} from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import {useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react'
 import {supabase} from '../../client/supabase'
-import {AgendaV2DatabaseService} from '../../db/agendaV2Database'
 import {DatabaseService} from '../../db/database'
+import {useAgendaOpsSync} from '../../hooks/useAgendaOpsSync'
 import {useMeetingTimer} from '../../hooks/useMeetingTimer'
 import {AgendaOpsSyncQueueService} from '../../services/agendaOpsSyncQueue'
 import {StorageService} from '../../services/storage'
@@ -11,8 +11,8 @@ import {useMeetingStore} from '../../store/meetingStore'
 import type {AgendaOpInput} from '../../types/agendaV2'
 import type {MeetingItem, MeetingSession} from '../../types/meeting'
 import {generateId} from '../../utils/id'
+import {summarizeMeetingTiming} from '../../utils/meetingTimingSummary'
 import {safeNavigateTo, safeSwitchTab} from '../../utils/safeNavigation'
-import {classifyTimingReport} from '../../utils/timingReport'
 
 export default function TimerPage() {
   const {currentSession, settings, setCurrentSession} = useMeetingStore()
@@ -26,20 +26,30 @@ export default function TimerPage() {
   const [editSpeaker, setEditSpeaker] = useState('')
   const [editDuration, setEditDuration] = useState('')
   const [editActualDuration, setEditActualDuration] = useState('')
-  const [agendaOpsSyncStatus, setAgendaOpsSyncStatus] = useState<'idle' | 'syncing' | 'failed'>('idle')
-  const [agendaOpsSyncError, setAgendaOpsSyncError] = useState<string>('')
 
   // 时间快速编辑相关状态
   const [showTimeEditDialog, setShowTimeEditDialog] = useState(false)
   const [selectedMinutes, setSelectedMinutes] = useState(0)
   const [selectedSeconds, setSelectedSeconds] = useState(0)
   const lastTapTimeRef = useRef(0)
-  const agendaOpsSyncQueueRef = useRef(Promise.resolve())
-  const agendaOpsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const realtimeSyncBusyRef = useRef(false)
   const syncAgendaOpsToCloudRef = useRef<(sessionSnapshot: MeetingSession, ops: AgendaOpInput[]) => Promise<void>>(
     async () => {}
   )
+  const {
+    agendaOpsSyncStatus,
+    agendaOpsSyncError,
+    drainAgendaOpsQueue,
+    enqueueAgendaOps,
+    waitForAgendaOpsQueue,
+    clearAgendaOpsRetryTimer
+  } = useAgendaOpsSync({
+    applySession: (session) => {
+      setCurrentSession(session)
+    },
+    queueErrorPrefix: 'Agenda V2 queued sync failed:',
+    unknownErrorMessage: '未知错误'
+  })
 
   const activeItems = useMemo(() => {
     return currentSession?.items.filter((i) => !i.disabled) || []
@@ -166,7 +176,7 @@ export default function TimerPage() {
 
   const handleComplete = async (finalItems: MeetingItem[]) => {
     if (!currentSession) return
-    await agendaOpsSyncQueueRef.current
+    await waitForAgendaOpsQueue()
 
     // 合并回原始列表（包括 disabled 的）
     const allItems = currentSession.items.map((item) => {
@@ -271,164 +281,12 @@ export default function TimerPage() {
       }))
   }, [])
 
-  const isAgendaVersionConflict = useCallback((errorText?: string, code?: string) => {
-    if (code === 'VERSION_CONFLICT' || code === 'ROW_VERSION_CONFLICT') return true
-    if (!errorText) return false
-    return errorText.includes('VERSION_CONFLICT') || errorText.includes('ROW_VERSION_CONFLICT')
-  }, [])
-
-  const refreshSessionFromCloud = useCallback(
-    async (meetingId: string): Promise<boolean> => {
-      const cloudSession = await DatabaseService.getMeeting(meetingId)
-      if (!cloudSession) {
-        Taro.showToast({title: '获取云端最新议程失败', icon: 'none'})
-        return false
-      }
-
-      setCurrentSession(cloudSession)
-      StorageService.saveSession(cloudSession, {syncToCloud: false})
-      return true
-    },
-    [setCurrentSession]
-  )
-
-  const drainAgendaOpsQueue = useCallback(
-    async (meetingId: string) => {
-      agendaOpsSyncQueueRef.current = agendaOpsSyncQueueRef.current
-        .then(async () => {
-          if (agendaOpsRetryTimerRef.current) {
-            clearTimeout(agendaOpsRetryTimerRef.current)
-            agendaOpsRetryTimerRef.current = null
-          }
-
-          const readyBatches = AgendaOpsSyncQueueService.listReadyBatches(meetingId)
-          if (readyBatches.length === 0) {
-            setAgendaOpsSyncStatus(AgendaOpsSyncQueueService.hasPending(meetingId) ? 'syncing' : 'idle')
-            return
-          }
-
-          setAgendaOpsSyncStatus('syncing')
-          setAgendaOpsSyncError('')
-
-          for (const batch of readyBatches) {
-            const latestSession = useMeetingStore.getState().currentSession
-            if (!latestSession || latestSession.id !== meetingId) {
-              break
-            }
-
-            const bootstrapResult = await AgendaV2DatabaseService.bootstrapAgendaFromSession(latestSession)
-            if (!bootstrapResult.success) {
-              AgendaOpsSyncQueueService.markRetry(batch.id, bootstrapResult.error || '初始化失败')
-              setAgendaOpsSyncStatus('failed')
-              setAgendaOpsSyncError(bootstrapResult.error || '初始化失败')
-              break
-            }
-
-            const baseAgendaVersion = bootstrapResult.data?.agendaVersion || latestSession.agendaVersion || 1
-            let applyResult = await AgendaV2DatabaseService.applyAgendaOps({
-              meetingId,
-              baseAgendaVersion,
-              ops: batch.ops,
-              clientTs: Date.now()
-            })
-
-            if (!applyResult.success && isAgendaVersionConflict(applyResult.error, applyResult.data?.code)) {
-              const latestCloud = await DatabaseService.getMeeting(meetingId)
-              if (latestCloud) {
-                const retryBaseVersion = latestCloud.agendaVersion || baseAgendaVersion
-                const retryResult = await AgendaV2DatabaseService.applyAgendaOps({
-                  meetingId,
-                  baseAgendaVersion: retryBaseVersion,
-                  ops: batch.ops,
-                  clientTs: Date.now()
-                })
-                if (retryResult.success) {
-                  applyResult = retryResult
-                } else {
-                  const refreshDecision = await Taro.showModal({
-                    title: '议程冲突',
-                    content: '检测到他人刚刚修改了议程。是否刷新到云端最新版本？',
-                    confirmText: '刷新最新',
-                    cancelText: '保留本地'
-                  })
-
-                  if (refreshDecision.confirm) {
-                    const refreshed = await refreshSessionFromCloud(meetingId)
-                    if (refreshed) {
-                      AgendaOpsSyncQueueService.removeBatch(batch.id)
-                      setAgendaOpsSyncStatus('idle')
-                      setAgendaOpsSyncError('')
-                      Taro.showToast({title: '已刷新到最新议程', icon: 'success'})
-                      continue
-                    }
-                  }
-
-                  applyResult = retryResult
-                }
-              }
-            }
-
-            if (!applyResult.success) {
-              const detail = applyResult.data
-              const isVersionConflict = isAgendaVersionConflict(applyResult.error, detail?.code)
-              if (isVersionConflict) {
-                AgendaOpsSyncQueueService.markRetry(batch.id, applyResult.error || detail?.code || '冲突未解决')
-                setAgendaOpsSyncStatus('failed')
-                setAgendaOpsSyncError(applyResult.error || detail?.code || '冲突未解决')
-              } else {
-                AgendaOpsSyncQueueService.markRetry(batch.id, applyResult.error || detail?.code || '同步失败')
-                setAgendaOpsSyncStatus('failed')
-                setAgendaOpsSyncError(applyResult.error || detail?.code || '同步失败')
-              }
-              break
-            }
-
-            const newVersion = applyResult.data?.newVersion
-            if (typeof newVersion === 'number') {
-              const newest = useMeetingStore.getState().currentSession
-              if (newest && newest.id === meetingId) {
-                const versionedSession: MeetingSession = {
-                  ...newest,
-                  agendaVersion: newVersion
-                }
-                setCurrentSession(versionedSession)
-                StorageService.saveSession(versionedSession, {syncToCloud: false})
-              }
-            }
-            AgendaOpsSyncQueueService.markSuccess(batch.id)
-          }
-
-          const nextRetryAt = AgendaOpsSyncQueueService.getNextRetryAt(meetingId)
-          if (nextRetryAt !== null && AgendaOpsSyncQueueService.hasPending(meetingId)) {
-            const delay = Math.max(300, nextRetryAt - Date.now())
-            agendaOpsRetryTimerRef.current = setTimeout(() => {
-              void drainAgendaOpsQueue(meetingId)
-            }, delay)
-          } else {
-            setAgendaOpsSyncStatus('idle')
-            setAgendaOpsSyncError('')
-          }
-        })
-        .catch((error) => {
-          console.warn('Agenda V2 queued sync failed:', error)
-          setAgendaOpsSyncStatus('failed')
-          setAgendaOpsSyncError(error instanceof Error ? error.message : '未知错误')
-        })
-
-      await agendaOpsSyncQueueRef.current
-    },
-    [isAgendaVersionConflict, refreshSessionFromCloud, setCurrentSession]
-  )
-
   const syncAgendaOpsToCloud = useCallback(
     async (sessionSnapshot: MeetingSession, ops: AgendaOpInput[]) => {
       if (!sessionSnapshot) return
-      if (ops.length > 0) {
-        AgendaOpsSyncQueueService.enqueue(sessionSnapshot.id, ops)
-      }
-      await drainAgendaOpsQueue(sessionSnapshot.id)
+      await enqueueAgendaOps(sessionSnapshot.id, ops)
     },
-    [drainAgendaOpsQueue]
+    [enqueueAgendaOps]
   )
   syncAgendaOpsToCloudRef.current = syncAgendaOpsToCloud
 
@@ -523,10 +381,7 @@ export default function TimerPage() {
   })
 
   Taro.useUnload(() => {
-    if (agendaOpsRetryTimerRef.current) {
-      clearTimeout(agendaOpsRetryTimerRef.current)
-      agendaOpsRetryTimerRef.current = null
-    }
+    clearAgendaOpsRetryTimer()
     persistCheckpointSnapshot()
   })
 
@@ -862,37 +717,17 @@ export default function TimerPage() {
         actualDuration: elapsed
       }
     })
-
-    const counters = {
-      onTime: 0,
-      overtime: 0,
-      severeOvertime: 0,
-      undertime: 0,
-      pending: 0
-    }
-    let totalPlanned = 0
-    let totalActual = 0
-
-    snapshotItems.forEach((item) => {
-      totalPlanned += item.plannedDuration
-      if (item.actualDuration === undefined) {
-        counters.pending += 1
-        return
-      }
-
-      totalActual += item.actualDuration
-      const category = classifyTimingReport(item.plannedDuration, item.actualDuration)
-      if (category === 'on_time') counters.onTime += 1
-      if (category === 'overtime') counters.overtime += 1
-      if (category === 'severe_overtime') counters.severeOvertime += 1
-      if (category === 'undertime') counters.undertime += 1
-    })
+    const summary = summarizeMeetingTiming(snapshotItems)
 
     return {
-      ...counters,
-      totalPlanned,
-      totalActual,
-      totalDiff: totalActual - totalPlanned
+      onTime: summary.ontimeCount,
+      overtime: summary.overtimeCount,
+      severeOvertime: summary.severeOvertimeCount,
+      undertime: summary.undertimeCount,
+      pending: summary.pendingCount,
+      totalPlanned: summary.totalPlanned,
+      totalActual: summary.totalActual,
+      totalDiff: summary.totalDiff
     }
   }, [activeItems, currentIndex, currentItem?.actualDuration, currentItem?.actualEndTime, currentItem?.actualStartTime, elapsed, isRunning])
 

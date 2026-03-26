@@ -4,7 +4,11 @@ import {type ReactNode, useEffect, useMemo, useState} from 'react'
 import {VotingDatabaseService} from '../db/votingDatabase'
 import type {MeetingItem} from '../types/meeting'
 import type {VotingResult} from '../types/voting'
-import {classifyTimingReport} from '../utils/timingReport'
+import {
+  type MeetingTimingOvertimeItem as OvertimeItem,
+  summarizeMeetingTiming,
+  type MeetingTimingUndertimeItem as UndertimeItem
+} from '../utils/meetingTimingSummary'
 
 interface MeetingStatsProps {
   items: MeetingItem[]
@@ -18,37 +22,6 @@ interface MeetingStatsProps {
   meetingId?: string // 会议ID，用于查找关联的投票
   onCreateVoting?: () => void // 创建投票的回调
   topContent?: ReactNode
-}
-
-interface SpeakerStats {
-  speaker: string
-  totalPlanned: number
-  totalActual: number
-  itemCount: number
-  overtimeCount: number
-  severeOvertimeCount: number
-  ontimeCount: number
-  undertimeCount: number
-  items: Array<{
-    itemId: string
-    title: string
-    planned: number
-    actual: number
-    diff: number
-  }>
-}
-
-interface OvertimeItem {
-  speaker: string
-  title: string
-  overtime: number
-  severe: boolean
-}
-
-interface UndertimeItem {
-  speaker: string
-  title: string
-  undertime: number
 }
 
 export default function MeetingStats({items, metadata, meetingId, onCreateVoting, topContent}: MeetingStatsProps) {
@@ -219,6 +192,7 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
 
   const activeItems = useMemo(() => items.filter((i) => !i.disabled && i.actualDuration !== undefined), [items])
 
+  const timingSummary = useMemo(() => summarizeMeetingTiming(activeItems), [activeItems])
   const {
     totalPlanned,
     totalActual,
@@ -229,104 +203,7 @@ export default function MeetingStats({items, metadata, meetingId, onCreateVoting
     speakerStats,
     overtimeBySpeaker,
     undertimeBySpeaker
-  } = useMemo(() => {
-    const speakerStatsMap = new Map<string, SpeakerStats>()
-    const overtimeItemsAcc: MeetingItem[] = []
-    const severeOvertimeItemsAcc: MeetingItem[] = []
-    const ontimeItemsAcc: MeetingItem[] = []
-    const undertimeItemsAcc: MeetingItem[] = []
-    const overtimeBySpeakerMap = new Map<string, OvertimeItem[]>()
-    const undertimeBySpeakerMap = new Map<string, UndertimeItem[]>()
-
-    let plannedSum = 0
-    let actualSum = 0
-
-    activeItems.forEach((item) => {
-      const speaker = item.speaker || '未指定'
-      const actual = item.actualDuration || 0
-      const diff = actual - item.plannedDuration
-      const category = classifyTimingReport(item.plannedDuration, actual)
-
-      plannedSum += item.plannedDuration
-      actualSum += actual
-
-      let stats = speakerStatsMap.get(speaker)
-      if (!stats) {
-        stats = {
-          speaker,
-          totalPlanned: 0,
-          totalActual: 0,
-          itemCount: 0,
-          overtimeCount: 0,
-          severeOvertimeCount: 0,
-          ontimeCount: 0,
-          undertimeCount: 0,
-          items: []
-        }
-        speakerStatsMap.set(speaker, stats)
-      }
-      stats.totalPlanned += item.plannedDuration
-      stats.totalActual += actual
-      stats.itemCount += 1
-
-      if (category === 'severe_overtime') {
-        stats.overtimeCount += 1
-        stats.severeOvertimeCount += 1
-        severeOvertimeItemsAcc.push(item)
-        overtimeItemsAcc.push(item)
-      } else if (category === 'overtime') {
-        stats.overtimeCount += 1
-        overtimeItemsAcc.push(item)
-      } else if (category === 'on_time') {
-        stats.ontimeCount += 1
-        ontimeItemsAcc.push(item)
-      } else if (category === 'undertime') {
-        stats.undertimeCount += 1
-        undertimeItemsAcc.push(item)
-      }
-
-      stats.items.push({
-        itemId: item.id,
-        title: item.title,
-        planned: item.plannedDuration,
-        actual,
-        diff
-      })
-
-      if (category === 'overtime' || category === 'severe_overtime') {
-        if (!overtimeBySpeakerMap.has(speaker)) {
-          overtimeBySpeakerMap.set(speaker, [])
-        }
-        overtimeBySpeakerMap.get(speaker)?.push({
-          speaker,
-          title: item.title,
-          overtime: diff,
-          severe: category === 'severe_overtime'
-        })
-      } else if (category === 'undertime') {
-        if (!undertimeBySpeakerMap.has(speaker)) {
-          undertimeBySpeakerMap.set(speaker, [])
-        }
-        undertimeBySpeakerMap.get(speaker)?.push({
-          speaker,
-          title: item.title,
-          undertime: Math.abs(diff)
-        })
-      }
-    })
-
-    return {
-      totalPlanned: plannedSum,
-      totalActual: actualSum,
-      overtimeItems: overtimeItemsAcc,
-      severeOvertimeItems: severeOvertimeItemsAcc,
-      ontimeItems: ontimeItemsAcc,
-      undertimeItems: undertimeItemsAcc,
-      speakerStats: Array.from(speakerStatsMap.values()),
-      overtimeBySpeaker: overtimeBySpeakerMap,
-      undertimeBySpeaker: undertimeBySpeakerMap
-    }
-  }, [activeItems])
+  } = timingSummary
 
   const formatDuration = (sec: number) => {
     const m = Math.floor(sec / 60)
