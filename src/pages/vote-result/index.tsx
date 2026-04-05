@@ -15,6 +15,7 @@ export default function VoteResultPage() {
   const [result, setResult] = useState<VotingResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [showPasswordModal, setShowPasswordModal] = useState(false)
+  const [passwordAction, setPasswordAction] = useState<'close' | 'delete' | null>(null)
   const [meetingNo, setMeetingNo] = useState<string | number | null>(null) // 会议号
   const [autoRefresh, setAutoRefresh] = useState(true) // 自动刷新开关
 
@@ -53,10 +54,7 @@ export default function VoteResultPage() {
       setMeetingNo(no)
     }
 
-    // 如果投票已关闭，停止自动刷新
-    if (data.session.status === 'closed') {
-      setAutoRefresh(false)
-    }
+    setAutoRefresh(data.session.status === 'active')
   }, [sessionId])
 
   // 自动刷新投票结果（每5秒）
@@ -73,10 +71,6 @@ export default function VoteResultPage() {
 
   useDidShow(() => {
     loadResult()
-    // 页面显示时重新启用自动刷新（如果投票未关闭）
-    if (result?.session.status === 'active') {
-      setAutoRefresh(true)
-    }
   })
 
   // 导出结果
@@ -124,12 +118,19 @@ export default function VoteResultPage() {
     })
   }
 
-  // 删除投票
-  const handleDelete = () => {
+  // 关闭投票
+  const handleCloseVoting = () => {
+    setPasswordAction('close')
     setShowPasswordModal(true)
   }
 
-  // 密码验证成功后删除
+  // 删除投票
+  const handleDelete = () => {
+    setPasswordAction('delete')
+    setShowPasswordModal(true)
+  }
+
+  // 密码验证成功后执行管理操作
   const handlePasswordConfirm = async (password: string) => {
     setShowPasswordModal(false)
 
@@ -138,33 +139,66 @@ export default function VoteResultPage() {
       return
     }
 
-    if (!sessionId) return
+    if (!sessionId || !passwordAction) return
 
-    // 密码正确，执行删除操作
-    Taro.showLoading({title: '删除中...'})
-    const deleteResult = await VotingDatabaseService.deleteVotingSession(sessionId)
-    Taro.hideLoading()
+    if (passwordAction === 'close') {
+      const decision = await Taro.showModal({
+        title: '关闭投票',
+        content: '关闭后将不再允许任何人投票或修改投票，但仍可查看结果。是否继续？',
+        confirmText: '确认关闭',
+        cancelText: '取消'
+      })
 
-    if (deleteResult.success) {
-      Taro.showToast({
-        title: '删除成功',
-        icon: 'success',
-        duration: 2000
-      })
-      // 延迟返回
-      setTimeout(() => {
-        Taro.navigateBack()
-      }, 2000)
-    } else {
-      Taro.showToast({
-        title: deleteResult.error || '删除失败',
-        icon: 'error'
-      })
+      if (!decision.confirm) {
+        setPasswordAction(null)
+        return
+      }
+
+      Taro.showLoading({title: '关闭中...'})
+      const closeResult = await VotingDatabaseService.closeVotingSession(sessionId)
+      Taro.hideLoading()
+
+      if (closeResult.success) {
+        await loadResult()
+        Taro.showToast({
+          title: '投票已关闭',
+          icon: 'success',
+          duration: 2000
+        })
+      } else {
+        Taro.showToast({
+          title: closeResult.error || '关闭失败',
+          icon: 'error'
+        })
+      }
+    } else if (passwordAction === 'delete') {
+      Taro.showLoading({title: '删除中...'})
+      const deleteResult = await VotingDatabaseService.deleteVotingSession(sessionId)
+      Taro.hideLoading()
+
+      if (deleteResult.success) {
+        Taro.showToast({
+          title: '删除成功',
+          icon: 'success',
+          duration: 2000
+        })
+        setTimeout(() => {
+          Taro.navigateBack()
+        }, 2000)
+      } else {
+        Taro.showToast({
+          title: deleteResult.error || '删除失败',
+          icon: 'error'
+        })
+      }
     }
+
+    setPasswordAction(null)
   }
 
   const handlePasswordCancel = () => {
     setShowPasswordModal(false)
+    setPasswordAction(null)
   }
 
   if (loading) {
@@ -245,6 +279,11 @@ export default function VoteResultPage() {
             <View className="ui-btn-secondary w-10 h-10 p-0 rounded-lg" onClick={handleExport}>
               <View className="i-mdi-export text-sm text-foreground" />
             </View>
+            {result.session.status === 'active' && (
+              <View className="ui-btn-secondary w-10 h-10 p-0 rounded-lg" onClick={handleCloseVoting}>
+                <View className="i-mdi-lock text-sm text-foreground" />
+              </View>
+            )}
             <View className="ui-btn-secondary w-10 h-10 p-0 rounded-lg" onClick={handleDelete}>
               <View className="i-mdi-delete text-sm text-foreground" />
             </View>

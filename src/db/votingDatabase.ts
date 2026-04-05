@@ -41,15 +41,88 @@ function buildVoteIdentityFilter(userId: string): string {
   return `voter_user_id.eq.${userId},voter_fingerprint.eq.${getVoterIdentityKey(userId)}`
 }
 
-function resolveStoredVoterName(
-  voteTraceMode: VotingSession['voteTraceMode'],
-  voterNameSnapshot?: string
-): string {
-  if (voteTraceMode === 'named') {
-    return voterNameSnapshot || '微信用户'
+function mapAtomicVoteError(error?: string): string {
+  switch (error) {
+    case 'ALREADY_SUBMITTED':
+      return 'ALREADY_SUBMITTED'
+    case 'VOTING_SESSION_NOT_FOUND':
+      return '投票不存在'
+    case 'VOTING_SESSION_CLOSED':
+      return '投票已关闭'
+    case 'AUTH_REQUIRED_FOR_TRACE_MODE':
+      return '当前投票需要登录后参与'
+    case 'EMPTY_SELECTIONS':
+      return '请至少选择一位候选人'
+    case 'INVALID_VOTING_GROUP':
+      return '投票分组无效，请刷新后重试'
+    case 'INVALID_CANDIDATE_GROUP_RELATION':
+      return '候选人数据已变更，请刷新后重试'
+    case 'MAX_SELECTIONS_EXCEEDED':
+      return '所选候选人数超过分组上限，请重新选择'
+    case 'DUPLICATE_CANDIDATE_SELECTION':
+      return '存在重复候选人，请重新选择'
+    default:
+      return error || '投票提交失败'
+  }
+}
+
+async function executeAtomicVoteSubmission(
+  session: VotingSession,
+  submission: VoteSubmission,
+  allowReplace: boolean
+): Promise<{success: boolean; error?: string}> {
+  const normalizedSelections = normalizeSelections(submission.selections)
+  const hasAnySelection = normalizedSelections.some((selection) => selection.candidateIds.length > 0)
+  if (!hasAnySelection) {
+    return {success: false, error: '请至少选择一位候选人'}
   }
 
-  return '匿名'
+  const voterIdentityKey = getVoterIdentityKey(submission.voterUserId)
+  const votesData: Array<{
+    id: string
+    voting_group_id: string
+    candidate_id: string
+    voter_name_snapshot: string
+    created_at: number
+  }> = []
+
+  normalizedSelections.forEach((selection) => {
+    selection.candidateIds.forEach((candidateId) => {
+      votesData.push({
+        id: generateId('vote'),
+        voting_group_id: selection.groupId,
+        candidate_id: candidateId,
+        voter_name_snapshot: submission.voterNameSnapshot || '微信用户',
+        created_at: Date.now()
+      })
+    })
+  })
+
+  const {data, error} = await supabase.rpc('persist_vote_atomic', {
+    p_voting_session_id: submission.votingSessionId,
+    p_voter_fingerprint: voterIdentityKey,
+    p_meeting_id: session.meetingId,
+    p_votes: votesData,
+    p_allow_replace: allowReplace
+  })
+
+  if (error) {
+    console.error('原子投票提交失败:', error)
+    if (isUniqueViolation(error)) {
+      return {success: false, error: allowReplace ? '投票修改冲突，请稍后重试' : 'ALREADY_SUBMITTED'}
+    }
+    return {success: false, error: error.message}
+  }
+
+  if (data && !data.success) {
+    console.error('原子投票提交失败:', data.error)
+    if (typeof data.error === 'string' && data.error.toLowerCase().includes('duplicate key')) {
+      return {success: false, error: allowReplace ? '投票修改冲突，请稍后重试' : 'ALREADY_SUBMITTED'}
+    }
+    return {success: false, error: mapAtomicVoteError(data.error)}
+  }
+
+  return {success: true}
 }
 
 /**
@@ -401,58 +474,7 @@ export const VotingDatabaseService = {
         return {success: false, error: '投票已过期'}
       }
 
-      // 2. 检查是否已投票
-      const normalizedSelections = normalizeSelections(submission.selections)
-      const hasAnySelection = normalizedSelections.some((selection) => selection.candidateIds.length > 0)
-      if (!hasAnySelection) {
-        return {success: false, error: '请至少选择一位候选人'}
-      }
-
-      const voterIdentityKey = getVoterIdentityKey(submission.voterUserId)
-      const storedVoterName = resolveStoredVoterName(session.voteTraceMode, submission.voterNameSnapshot)
-
-      const {data: existingVotes} = await supabase
-        .from('votes')
-        .select('id')
-        .eq('voting_session_id', submission.votingSessionId)
-        .or(buildVoteIdentityFilter(submission.voterUserId))
-        .limit(1)
-
-      if (existingVotes && existingVotes.length > 0) {
-        return {success: false, error: 'ALREADY_SUBMITTED'}
-      }
-
-      // 3. 准备投票数据（不需要姓名）
-      const votesData: any[] = []
-      normalizedSelections.forEach((selection) => {
-        selection.candidateIds.forEach((candidateId) => {
-          votesData.push({
-            id: generateId('vote'),
-            voting_session_id: submission.votingSessionId,
-            voting_group_id: selection.groupId,
-            candidate_id: candidateId,
-            meeting_id: session.meetingId, // 添加 meeting_id
-            voter_name: storedVoterName,
-            voter_fingerprint: voterIdentityKey,
-            voter_user_id: submission.voterUserId,
-            voter_name_snapshot: submission.voterNameSnapshot || '微信用户',
-            created_at: Date.now()
-          })
-        })
-      })
-
-      // 4. 批量插入投票
-      const {error: votesError} = await supabase.from('votes').insert(votesData)
-
-      if (votesError) {
-        console.error('提交投票失败:', votesError)
-        if (isUniqueViolation(votesError)) {
-          return {success: false, error: 'ALREADY_SUBMITTED'}
-        }
-        return {success: false, error: votesError.message}
-      }
-
-      return {success: true}
+      return await executeAtomicVoteSubmission(session, submission, false)
     } catch (error) {
       console.error('提交投票异常:', error)
       return {success: false, error: error instanceof Error ? error.message : 'Unknown error'}
@@ -652,54 +674,7 @@ export const VotingDatabaseService = {
         return {success: false, error: '投票已过期'}
       }
 
-      // 2. 准备投票数据
-      const normalizedSelections = normalizeSelections(submission.selections)
-      const hasAnySelection = normalizedSelections.some((selection) => selection.candidateIds.length > 0)
-      if (!hasAnySelection) {
-        return {success: false, error: '请至少选择一位候选人'}
-      }
-
-      const voterIdentityKey = getVoterIdentityKey(submission.voterUserId)
-
-      const votesData: any[] = []
-      normalizedSelections.forEach((selection) => {
-        selection.candidateIds.forEach((candidateId) => {
-          votesData.push({
-            id: generateId('vote'),
-            voting_group_id: selection.groupId,
-            candidate_id: candidateId,
-            voter_name_snapshot: submission.voterNameSnapshot || '微信用户',
-            created_at: Date.now()
-          })
-        })
-      })
-
-      // 3. 调用原子性RPC函数（删除+插入在一个事务中）
-      const {data, error} = await supabase.rpc('update_vote_atomic', {
-        p_voting_session_id: submission.votingSessionId,
-        p_voter_fingerprint: voterIdentityKey,
-        p_meeting_id: session.meetingId,
-        p_votes: votesData
-      })
-
-      if (error) {
-        console.error('更新投票失败:', error)
-        if (isUniqueViolation(error)) {
-          return {success: false, error: '投票修改冲突，请稍后重试'}
-        }
-        return {success: false, error: error.message}
-      }
-
-      if (data && !data.success) {
-        console.error('更新投票失败:', data.error)
-        if (typeof data.error === 'string' && data.error.toLowerCase().includes('duplicate key')) {
-          return {success: false, error: '投票修改冲突，请稍后重试'}
-        }
-        return {success: false, error: data.error}
-      }
-
-      console.log('投票更新成功:', data)
-      return {success: true}
+      return await executeAtomicVoteSubmission(session, submission, true)
     } catch (error) {
       console.error('更新投票异常:', error)
       return {success: false, error: error instanceof Error ? error.message : 'Unknown error'}
