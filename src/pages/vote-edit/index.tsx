@@ -31,7 +31,9 @@ function normalizeRequestError(error: unknown) {
 
 function isFunctionNotFoundError(error: unknown) {
   const message = normalizeRequestError(error)
-  return message.includes('NOT_FOUND') || message.includes('Requested function was not found') || message.includes('404')
+  return (
+    message.includes('NOT_FOUND') || message.includes('Requested function was not found') || message.includes('404')
+  )
 }
 
 async function invokePublicEdgeFunction<T>(functionName: string, body: Record<string, unknown>): Promise<T> {
@@ -96,22 +98,25 @@ export default function VoteEditPage() {
     setAiStatusText(message)
   }, [])
 
-  const mergeAIGroups = useCallback((aiGroups: VotingGroup[]) => {
-    if (!currentSession) {
-      return aiGroups
-    }
+  const mergeAIGroups = useCallback(
+    (aiGroups: VotingGroup[]) => {
+      if (!currentSession) {
+        return aiGroups
+      }
 
-    const localGroups = groupCandidatesFromMeeting(currentSession)
-    const localImpromptuGroup = localGroups.find((group) => group.groupType === 'tableTopics') || null
+      const localGroups = groupCandidatesFromMeeting(currentSession)
+      const localImpromptuGroup = localGroups.find((group) => group.groupType === 'tableTopics') || null
 
-    if (!localImpromptuGroup) {
-      return aiGroups
-    }
+      if (!localImpromptuGroup) {
+        return aiGroups
+      }
 
-    return [...aiGroups.filter((group) => group.groupType !== 'tableTopics'), localImpromptuGroup].sort(
-      (a, b) => a.orderIndex - b.orderIndex
-    )
-  }, [currentSession])
+      return [...aiGroups.filter((group) => group.groupType !== 'tableTopics'), localImpromptuGroup].sort(
+        (a, b) => a.orderIndex - b.orderIndex
+      )
+    },
+    [currentSession]
+  )
 
   const applyLocalFallback = useCallback(
     (toastTitle: string) => {
@@ -161,19 +166,19 @@ export default function VoteEditPage() {
         }
 
         if (job.status === 'processing') {
-          setGeneratingStatus('AI 分组中...')
+          setGeneratingStatus('智能分组中...')
           await sleep(votingPollIntervalMs)
           continue
         }
 
         if (job.status === 'failed') {
-          throw new Error(job.errorMessage || 'AI 分组任务失败')
+          throw new Error(job.errorMessage || '智能分组任务失败')
         }
 
         if (job.status === 'succeeded') {
           const generatedGroups = job.result?.groups
           if (!generatedGroups || !Array.isArray(generatedGroups)) {
-            throw new Error('AI 分组任务已完成，但结果为空')
+            throw new Error('智能分组任务已完成，但结果为空')
           }
           return generatedGroups
         }
@@ -181,7 +186,7 @@ export default function VoteEditPage() {
         throw new Error('未知的投票分组任务状态')
       }
 
-      throw new Error('页面已离开，停止等待 AI 分组结果')
+      throw new Error('页面已离开，停止等待智能分组结果')
     },
     [setGeneratingStatus]
   )
@@ -197,7 +202,7 @@ export default function VoteEditPage() {
 
     const generatedGroups = response.groups
     if (!generatedGroups || !Array.isArray(generatedGroups)) {
-      throw new Error(response.error || 'AI 返回格式错误')
+      throw new Error(response.error || '智能分组结果格式错误')
     }
 
     return generatedGroups
@@ -235,7 +240,7 @@ export default function VoteEditPage() {
           throw error
         }
 
-        setGeneratingStatus('兼容旧版 AI...')
+        setGeneratingStatus('兼容旧版分组服务...')
         aiGroups = await generateGroupsWithLegacyAI()
       }
 
@@ -248,18 +253,18 @@ export default function VoteEditPage() {
       setGroups(mergedGroups)
       setAiStatusText('')
       Taro.showToast({
-        title: `AI 分组完成，共 ${mergedGroups.length} 组`,
+        title: `智能分组完成，共 ${mergedGroups.length} 组`,
         icon: 'success'
       })
     } catch (error) {
-      console.error('调用 AI 失败:', error)
+      console.error('调用智能分组失败:', error)
       if (isPageActiveRef.current) {
         setAiStatusText('')
       }
-      const hasFallback = applyLocalFallback('AI 分组失败，已切换本地分组')
+      const hasFallback = applyLocalFallback('智能分组失败，已切换本地分组')
       if (!hasFallback && isPageActiveRef.current) {
         Taro.showToast({
-          title: error instanceof Error ? error.message : 'AI 分组失败',
+          title: error instanceof Error ? error.message : '智能分组失败',
           icon: 'none',
           duration: 3000
         })
@@ -507,7 +512,7 @@ export default function VoteEditPage() {
         </View>
         {aiGenerating && (
           <View className="mt-2 bg-primary/15 p-2 rounded-lg border border-primary/30">
-            <Text className="text-xs text-foreground text-center">{aiStatusText || 'AI 分组中...'}</Text>
+            <Text className="text-xs text-foreground text-center">{aiStatusText || '智能分组中...'}</Text>
           </View>
         )}
       </View>
@@ -642,7 +647,7 @@ export default function VoteEditPage() {
             className="flex-1 min-w-0 ui-btn-secondary h-11 break-keep text-sm"
             disabled={aiGenerating}
             onClick={() => void generateGroupsWithAI()}>
-            {aiGenerating ? 'AI分组中...' : '重新 AI 分组'}
+            {aiGenerating ? '智能分组中...' : '重新智能分组'}
           </Button>
           <Button className="flex-1 min-w-0 ui-btn-primary h-11 break-keep text-sm" onClick={handleSave}>
             保存并创建投票

@@ -612,10 +612,7 @@ export const VotingDatabaseService = {
   /**
    * 获取用户的投票记录
    */
-  async getUserVotes(
-    sessionId: string,
-    userId: string
-  ): Promise<{groupId: string; candidateIds: string[]}[] | null> {
+  async getUserVotes(sessionId: string, userId: string): Promise<{groupId: string; candidateIds: string[]}[] | null> {
     try {
       const {data, error} = await supabase
         .from('votes')

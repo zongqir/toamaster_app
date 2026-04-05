@@ -609,7 +609,7 @@ export default function TimerPage() {
         : undefined,
     [currentLiveParticipantKey, currentLivePhase, isCurrentImpromptu]
   )
-  const liveCursorSyncBucket = useMemo(() => {
+  const _liveCursorSyncBucket = useMemo(() => {
     if (!currentSession?.id) return 'no-session'
     if (!currentItem) return `idle:${currentSession.id}`
 
@@ -728,7 +728,6 @@ export default function TimerPage() {
     currentLiveOverrides,
     currentSession?.agendaVersion,
     currentSession?.id,
-    liveCursorSyncBucket,
     persistTimerOfficerLiveCursor,
     remaining
   ])
@@ -2113,13 +2112,7 @@ export default function TimerPage() {
           : isLastItem
             ? '这会结束当前即兴环节，并直接完成整场会议。'
             : '这会结束当前即兴环节并进入下一节，之后仍可通过“上一节”回到这里。',
-        confirmText: isSkippingUnstartedImpromptu
-          ? isLastItem
-            ? '完成'
-            : '跳过'
-          : isLastItem
-            ? '完成'
-            : '下一节',
+        confirmText: isSkippingUnstartedImpromptu ? (isLastItem ? '完成' : '跳过') : isLastItem ? '完成' : '下一节',
         cancelText: '取消'
       })
       if (!decision.confirm) return
@@ -2625,9 +2618,7 @@ export default function TimerPage() {
           <View
             className={`flex-1 ui-btn-secondary ${isCompact ? 'h-10' : 'h-11'} rounded-xl`}
             onClick={handlePrevItem}>
-            <Text className={`${isCompact ? 'text-[11px]' : 'text-sm'} font-semibold text-foreground`}>
-              {'上一节'}
-            </Text>
+            <Text className={`${isCompact ? 'text-[11px]' : 'text-sm'} font-semibold text-foreground`}>{'上一节'}</Text>
           </View>
           <View
             className={`flex-1 ui-btn-primary ${isCompact ? 'h-10' : 'h-11'} rounded-xl border-none`}

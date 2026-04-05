@@ -469,7 +469,7 @@ export default function ImportPage() {
           </View>
           <Text className="text-2xl font-bold text-foreground block">📋 导入会议流程</Text>
         </View>
-        <Text className="text-sm text-muted-foreground mt-2 block ml-10">粘贴表格文本或上传图片，使用 AI 智能解析</Text>
+        <Text className="text-sm text-muted-foreground mt-2 block ml-10">粘贴表格文本或上传图片，使用智能解析</Text>
       </View>
 
       {/* 图片 OCR 按钮 */}
@@ -510,7 +510,7 @@ export default function ImportPage() {
 
       <View className="mt-6 space-y-4">
         <View className="ui-card p-5 border-primary/20">
-          <Text className="text-base text-primary block mb-4 font-bold">🤖 AI 智能解析</Text>
+          <Text className="text-base text-primary block mb-4 font-bold">✨ 智能解析</Text>
           <View className="space-y-3">
             <View className="flex items-start">
               <Text className="text-primary mr-2 text-sm font-bold">1.</Text>
@@ -522,7 +522,7 @@ export default function ImportPage() {
             </View>
             <View className="flex items-start">
               <Text className="text-primary mr-2 text-sm font-bold">3.</Text>
-              <Text className="text-sm text-muted-foreground flex-1">粘贴到上方输入框，AI 将自动识别负责人和时长</Text>
+              <Text className="text-sm text-muted-foreground flex-1">粘贴到上方输入框，系统将自动识别负责人和时长</Text>
             </View>
           </View>
           <View className="mt-4 pt-3 border-t border-border/30">
@@ -550,7 +550,7 @@ export default function ImportPage() {
           ) : (
             <View className="flex items-center justify-center">
               <View className="i-mdi-auto-fix text-lg mr-2 text-white" />
-              <Text className="text-white font-bold text-sm">AI 解析</Text>
+              <Text className="text-white font-bold text-sm">智能解析</Text>
             </View>
           )}
         </View>

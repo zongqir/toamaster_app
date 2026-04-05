@@ -594,7 +594,9 @@ export default function MeetingStats({
                         </View>
                         <View className="bg-background/50 p-2 rounded-lg">
                           <Text className="text-[11px] text-foreground/80 block">差额</Text>
-                          <Text className={`text-sm font-bold ${getDiffColor(item.diff)}`}>{formatDiff(item.diff)}</Text>
+                          <Text className={`text-sm font-bold ${getDiffColor(item.diff)}`}>
+                            {formatDiff(item.diff)}
+                          </Text>
                         </View>
                         <View className="bg-background/50 p-2 rounded-lg">
                           <Text className="text-[11px] text-foreground/80 block">判定</Text>
@@ -638,7 +640,8 @@ export default function MeetingStats({
                           </Text>
                           <Text className="text-xs text-muted-foreground block mt-1">负责人：{item.speaker}</Text>
                         </View>
-                        <Text className={`text-sm font-bold shrink-0 ${item.severe ? 'text-fuchsia-400' : 'text-red-500'}`}>
+                        <Text
+                          className={`text-sm font-bold shrink-0 ${item.severe ? 'text-fuchsia-400' : 'text-red-500'}`}>
                           +{formatDuration(item.overtime)}
                         </Text>
                       </View>
@@ -689,7 +692,9 @@ export default function MeetingStats({
                           </Text>
                           <Text className="text-xs text-muted-foreground block mt-1">负责人：{item.speaker}</Text>
                         </View>
-                        <Text className="text-sm font-bold text-sky-300 shrink-0">-{formatDuration(item.undertime)}</Text>
+                        <Text className="text-sm font-bold text-sky-300 shrink-0">
+                          -{formatDuration(item.undertime)}
+                        </Text>
                       </View>
                       <View className="mt-3 bg-background/40 px-2 py-1 rounded-lg">
                         <Text className="text-xs text-foreground/85">
@@ -765,11 +770,13 @@ export default function MeetingStats({
                                         }`}>
                                         {rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `${rank}`}
                                       </Text>
-                                      <Text className={`text-sm ${isTop3 ? 'font-medium' : ''} text-foreground truncate`}>
+                                      <Text
+                                        className={`text-sm ${isTop3 ? 'font-medium' : ''} text-foreground truncate`}>
                                         {candidateResult.candidate.name}
                                       </Text>
                                     </View>
-                                    <Text className={`text-sm font-bold ${isTop3 ? 'text-cyan-300' : 'text-foreground'}`}>
+                                    <Text
+                                      className={`text-sm font-bold ${isTop3 ? 'text-cyan-300' : 'text-foreground'}`}>
                                       {candidateResult.voteCount} 票
                                     </Text>
                                   </View>

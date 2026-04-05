@@ -60,7 +60,6 @@ function getCategoryLabel(category: TimingReportCategory | 'not_started') {
       return '时间不足'
     case 'on_time':
       return '准时'
-    case 'not_started':
     default:
       return '未记录'
   }
@@ -76,7 +75,6 @@ function getCategoryTextClass(category: TimingReportCategory | 'not_started') {
       return 'text-sky-300'
     case 'on_time':
       return 'text-primary'
-    case 'not_started':
     default:
       return 'text-muted-foreground'
   }
@@ -196,7 +194,9 @@ function buildOfficerReportText(params: {
     lines.push('按成员汇总：')
     participantSummaries.forEach((row, index) => {
       const fillerText =
-        row.fillerBreakdown.length > 0 ? row.fillerBreakdown.map((item) => `${item.word} ${item.count}`).join('，') : '无'
+        row.fillerBreakdown.length > 0
+          ? row.fillerBreakdown.map((item) => `${item.word} ${item.count}`).join('，')
+          : '无'
       lines.push(
         `${index + 1}. ${row.participantName}`,
         `语法记录 ${row.grammarNoteCount} 条，语法问题 ${row.grammarIssueCount} 条，每日一词 ${row.wordOfDayHits} 次，哼哈词 ${row.fillerTotal} 次`,
@@ -336,7 +336,9 @@ export default function CompletedMeetingReview({
     return Array.from(summaryMap.values())
       .map((summary) => ({
         ...summary,
-        fillerBreakdown: summary.fillerBreakdown.sort((left, right) => right.count - left.count || left.word.localeCompare(right.word))
+        fillerBreakdown: summary.fillerBreakdown.sort(
+          (left, right) => right.count - left.count || left.word.localeCompare(right.word)
+        )
       }))
       .sort((left, right) => {
         const scoreLeft = left.grammarNoteCount + left.wordOfDayHits + left.fillerTotal
@@ -376,7 +378,6 @@ export default function CompletedMeetingReview({
           grammarNotes,
           ahRecords
         })
-      case 'info':
       default:
         return buildInfoReportText(session, metadata)
     }
@@ -486,13 +487,16 @@ export default function CompletedMeetingReview({
               </View>
               <View className="ui-panel-sharp p-2">
                 <Text className="text-[11px] text-muted-foreground block">差额</Text>
-                <Text className={`text-sm font-bold mt-1 ${row.diff === null ? 'text-muted-foreground' : getCategoryTextClass(row.category)}`}>
+                <Text
+                  className={`text-sm font-bold mt-1 ${row.diff === null ? 'text-muted-foreground' : getCategoryTextClass(row.category)}`}>
                   {row.diff === null ? '--' : formatDiff(row.diff)}
                 </Text>
               </View>
             </View>
 
-            {row.disabled && <Text className="text-[11px] text-amber-300 block mt-3">该环节已被禁用，不参与正式流程。</Text>}
+            {row.disabled && (
+              <Text className="text-[11px] text-amber-300 block mt-3">该环节已被禁用，不参与正式流程。</Text>
+            )}
           </View>
         ))}
       </View>
@@ -524,7 +528,9 @@ export default function CompletedMeetingReview({
               </Text>
             </View>
           </View>
-          <Text className="text-xs text-muted-foreground block mt-3">每日一词：{metadata.wordOfTheDay || '未设置'}</Text>
+          <Text className="text-xs text-muted-foreground block mt-3">
+            每日一词：{metadata.wordOfTheDay || '未设置'}
+          </Text>
         </View>
 
         {loadingOfficerData ? (
@@ -555,7 +561,10 @@ export default function CompletedMeetingReview({
                 </View>
               </View>
               <Text className="text-xs text-muted-foreground block mt-3">
-                哼哈词：{summary.fillerBreakdown.length > 0 ? summary.fillerBreakdown.map((item) => `${item.word} ${item.count}`).join('，') : '暂无'}
+                哼哈词：
+                {summary.fillerBreakdown.length > 0
+                  ? summary.fillerBreakdown.map((item) => `${item.word} ${item.count}`).join('，')
+                  : '暂无'}
               </Text>
             </View>
           ))
@@ -572,7 +581,7 @@ export default function CompletedMeetingReview({
               {grammarNotes.slice(0, 12).map((note) => (
                 <View key={note.id} className="ui-panel-sharp p-3">
                   <Text className="text-xs text-primary font-semibold">
-                    {(participantNameMap.get(note.participant_key) || note.participant_key) + '｜' + note.note_type}
+                    {`${participantNameMap.get(note.participant_key) || note.participant_key}｜${note.note_type}`}
                   </Text>
                   <Text className="text-sm text-foreground mt-1 break-all">{note.content}</Text>
                 </View>
@@ -611,7 +620,9 @@ export default function CompletedMeetingReview({
           <Button className="ui-btn-secondary h-10 text-sm" onClick={() => handleCopy(currentPanelText, '本页已复制')}>
             复制本页
           </Button>
-          <Button className="ui-btn-primary h-10 text-sm font-bold" onClick={() => handleCopy(totalPanelText, '总复盘已复制')}>
+          <Button
+            className="ui-btn-primary h-10 text-sm font-bold"
+            onClick={() => handleCopy(totalPanelText, '总复盘已复制')}>
             复制总复盘
           </Button>
         </View>

@@ -1118,7 +1118,9 @@ export default function TimelinePage() {
                         onClick={() => index < items.length - 1 && moveItemDown(index)}>
                         <View className="i-mdi-chevron-down text-base text-foreground/85" />
                       </View>
-                      <View className="ui-mini-icon-btn" onClick={() => updateItem(item.id, {disabled: !item.disabled})}>
+                      <View
+                        className="ui-mini-icon-btn"
+                        onClick={() => updateItem(item.id, {disabled: !item.disabled})}>
                         {item.disabled ? (
                           <View className="i-mdi-eye-off text-base text-foreground/85" />
                         ) : (
