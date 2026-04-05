@@ -1,5 +1,3 @@
-import {createClient} from 'npm:@supabase/supabase-js@2'
-
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -20,6 +18,21 @@ type WechatSessionResponse = {
   session_key?: string
   errcode?: number
   errmsg?: string
+}
+
+type SupabaseAdminUser = {
+  id?: string
+  user_metadata?: Record<string, unknown>
+}
+
+type AdminApiResult<T> = {
+  data: T | null
+  error: string | null
+  status: number
+}
+
+type GenerateLinkResponse = SupabaseAdminUser & {
+  hashed_token?: string
 }
 
 function jsonResponse(payload: Record<string, unknown>, status = 200) {
@@ -52,6 +65,73 @@ function normalizeAvatarUrl(value: unknown): string | null {
     return null
   }
   return /^https?:\/\//i.test(trimmed) ? trimmed : null
+}
+
+function getSupabaseAuthAdminUrl(supabaseUrl: string, path: string) {
+  return `${supabaseUrl.replace(/\/$/, '')}/auth/v1/admin/${path.replace(/^\//, '')}`
+}
+
+async function parseJsonSafely(response: Response): Promise<unknown> {
+  const text = await response.text()
+  if (!text) {
+    return null
+  }
+
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
+}
+
+function extractErrorMessage(payload: unknown, fallback: string) {
+  if (typeof payload === 'string' && payload.trim()) {
+    return payload
+  }
+
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>
+    const candidates = [record.msg, record.message, record.error_description, record.error]
+    for (const value of candidates) {
+      if (typeof value === 'string' && value.trim()) {
+        return value
+      }
+    }
+  }
+
+  return fallback
+}
+
+async function callSupabaseAdmin<T>(
+  supabaseUrl: string,
+  serviceRoleKey: string,
+  path: string,
+  init: RequestInit,
+): Promise<AdminApiResult<T>> {
+  const response = await fetch(getSupabaseAuthAdminUrl(supabaseUrl, path), {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${serviceRoleKey}`,
+      apikey: serviceRoleKey,
+      'Content-Type': 'application/json',
+      ...(init.headers || {}),
+    },
+  })
+
+  const payload = await parseJsonSafely(response)
+  if (!response.ok) {
+    return {
+      data: null,
+      error: extractErrorMessage(payload, `Supabase Auth Admin 请求失败: HTTP ${response.status}`),
+      status: response.status,
+    }
+  }
+
+  return {
+    data: (payload as T) ?? null,
+    error: null,
+    status: response.status,
+  }
 }
 
 async function fetchWechatSession(code: string, appId: string, appSecret: string): Promise<WechatSessionResponse> {
@@ -141,62 +221,79 @@ Deno.serve(async (req) => {
       metadata.picture = avatarUrl
     }
 
-    const supabaseAdmin = createClient(supabaseUrl, serviceRoleKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    })
-
     let userId: string | null = null
     let isNewUser = false
 
-    const {data: createUserData, error: createUserError} = await supabaseAdmin.auth.admin.createUser({
-      email,
-      email_confirm: true,
-      user_metadata: metadata,
-      app_metadata: {
-        provider: 'wechat_miniprogram',
+    const createUserResult = await callSupabaseAdmin<SupabaseAdminUser>(
+      supabaseUrl,
+      serviceRoleKey,
+      'users',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          email,
+          email_confirm: true,
+          user_metadata: metadata,
+          app_metadata: {
+            provider: 'wechat_miniprogram',
+          },
+        }),
       },
-    })
+    )
 
-    if (createUserError) {
-      const message = createUserError.message || ''
+    if (createUserResult.error) {
+      const message = createUserResult.error
       const isAlreadyExists = /already registered|already been registered|already exists/i.test(message)
       if (!isAlreadyExists) {
         throw new Error(`创建用户失败: ${message}`)
       }
     } else {
-      userId = createUserData.user?.id || null
+      userId = createUserResult.data?.id || null
       isNewUser = Boolean(userId)
     }
 
-    const {data: linkData, error: generateLinkError} = await supabaseAdmin.auth.admin.generateLink({
-      type: 'magiclink',
-      email,
-    })
-    if (generateLinkError) {
-      throw new Error(`生成登录链接失败: ${generateLinkError.message}`)
+    const generateLinkResult = await callSupabaseAdmin<GenerateLinkResponse>(
+      supabaseUrl,
+      serviceRoleKey,
+      'generate_link',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'magiclink',
+          email,
+        }),
+      },
+    )
+    if (generateLinkResult.error) {
+      throw new Error(`生成登录链接失败: ${generateLinkResult.error}`)
     }
 
-    const tokenHash = linkData.properties?.hashed_token
+    const tokenHash = generateLinkResult.data?.hashed_token
     if (!tokenHash) {
       throw new Error('生成登录 token 失败')
     }
 
-    const linkUserId = linkData.user?.id || null
+    const linkUserId = generateLinkResult.data?.id || null
     const targetUserId = linkUserId || userId
 
     if (targetUserId) {
-      const existingMetadata = (linkData.user?.user_metadata || {}) as Record<string, unknown>
+      const existingMetadata = (generateLinkResult.data?.user_metadata || {}) as Record<string, unknown>
       const mergedMetadata = {...existingMetadata, ...metadata}
 
-      const {error: updateUserError} = await supabaseAdmin.auth.admin.updateUserById(targetUserId, {
-        user_metadata: mergedMetadata,
-      })
+      const updateUserResult = await callSupabaseAdmin<SupabaseAdminUser>(
+        supabaseUrl,
+        serviceRoleKey,
+        `user/${targetUserId}`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            user_metadata: mergedMetadata,
+          }),
+        },
+      )
 
-      if (updateUserError) {
-        console.warn('[wechat-miniprogram-login] 更新用户 metadata 失败:', updateUserError.message)
+      if (updateUserResult.error) {
+        console.warn('[wechat-miniprogram-login] 更新用户 metadata 失败:', updateUserResult.error)
       }
     }
 

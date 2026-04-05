@@ -20,6 +20,32 @@ export type MeetingItemType =
   | 'closing'
   | 'other'
 
+export type MeetingItemBusinessType = 'normal' | 'impromptu_block' | 'impromptu_speech'
+
+export type ImpromptuSpeechStatus = 'pending' | 'speaking' | 'completed' | 'cancelled'
+
+export type ImpromptuSpeechRecord = {
+  id: string
+  meetingId: string
+  agendaItemId: string
+  sortOrder: number
+  speakerName: string
+  speakerKey: string
+  status: ImpromptuSpeechStatus
+  poolDurationSeconds: number
+  poolRemainingSecondsAtStart?: number
+  startedWithLowRemaining?: boolean
+  speechPlannedDurationSeconds: number
+  speechStartedAt?: number
+  speechEndedAt?: number
+  speechDurationSeconds?: number
+  isOvertime?: boolean
+  notes?: string
+  createdAt: number
+  updatedAt: number
+  deletedAt?: number
+}
+
 export type MeetingItem = {
   id: string
   title: string
@@ -30,6 +56,11 @@ export type MeetingItem = {
   ruleId: string
   disabled?: boolean
   parentTitle?: string // 父级标题（用于子活动）
+  businessType?: MeetingItemBusinessType
+  agendaParentItemId?: string
+  slotGroupKey?: string
+  budgetLimitSeconds?: number
+  consumeParentBudget?: boolean
 
   // 运行记录
   actualStartTime?: number
@@ -55,6 +86,7 @@ export type MeetingSession = {
   id: string
   metadata: MeetingMetadata
   items: MeetingItem[]
+  impromptuRecords?: ImpromptuSpeechRecord[]
   createdAt: number
   agendaVersion?: number
   isCompleted?: boolean

@@ -41,3 +41,6 @@ output/
 .sync
 history/*.json
 .vite_cache
+dist-h5/
+dist-weapp/
+.playwright-cli/

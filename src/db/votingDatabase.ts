@@ -33,6 +33,25 @@ function normalizeSelections(selections: VoteSubmission['selections']): VoteSubm
   }))
 }
 
+function getVoterIdentityKey(userId: string): string {
+  return `wxuser_${userId.replace(/-/g, '')}`
+}
+
+function buildVoteIdentityFilter(userId: string): string {
+  return `voter_user_id.eq.${userId},voter_fingerprint.eq.${getVoterIdentityKey(userId)}`
+}
+
+function resolveStoredVoterName(
+  voteTraceMode: VotingSession['voteTraceMode'],
+  voterNameSnapshot?: string
+): string {
+  if (voteTraceMode === 'named') {
+    return voterNameSnapshot || '微信用户'
+  }
+
+  return '匿名'
+}
+
 /**
  * 投票数据库服务
  */
@@ -181,6 +200,7 @@ export const VotingDatabaseService = {
         title: session.title,
         description: session.description || null,
         status: session.status,
+        vote_trace_mode: session.voteTraceMode || 'anonymous',
         created_at: session.createdAt,
         expires_at: session.expiresAt || null,
         created_by: session.createdBy || null
@@ -345,6 +365,7 @@ export const VotingDatabaseService = {
         title: session.title,
         description: session.description || undefined,
         status: session.status,
+        voteTraceMode: session.vote_trace_mode || 'anonymous',
         createdAt: session.created_at,
         expiresAt: session.expires_at || undefined,
         createdBy: session.created_by || undefined,
@@ -380,18 +401,21 @@ export const VotingDatabaseService = {
         return {success: false, error: '投票已过期'}
       }
 
-      // 2. 检查是否已投票（只用设备指纹）
+      // 2. 检查是否已投票
       const normalizedSelections = normalizeSelections(submission.selections)
       const hasAnySelection = normalizedSelections.some((selection) => selection.candidateIds.length > 0)
       if (!hasAnySelection) {
         return {success: false, error: '请至少选择一位候选人'}
       }
 
+      const voterIdentityKey = getVoterIdentityKey(submission.voterUserId)
+      const storedVoterName = resolveStoredVoterName(session.voteTraceMode, submission.voterNameSnapshot)
+
       const {data: existingVotes} = await supabase
         .from('votes')
         .select('id')
         .eq('voting_session_id', submission.votingSessionId)
-        .eq('voter_fingerprint', submission.voterFingerprint)
+        .or(buildVoteIdentityFilter(submission.voterUserId))
         .limit(1)
 
       if (existingVotes && existingVotes.length > 0) {
@@ -408,8 +432,10 @@ export const VotingDatabaseService = {
             voting_group_id: selection.groupId,
             candidate_id: candidateId,
             meeting_id: session.meetingId, // 添加 meeting_id
-            voter_name: '匿名', // 固定为匿名
-            voter_fingerprint: submission.voterFingerprint,
+            voter_name: storedVoterName,
+            voter_fingerprint: voterIdentityKey,
+            voter_user_id: submission.voterUserId,
+            voter_name_snapshot: submission.voterNameSnapshot || '微信用户',
             created_at: Date.now()
           })
         })
@@ -463,7 +489,7 @@ export const VotingDatabaseService = {
             return {
               candidate,
               voteCount: candidateVotes.length,
-              voters: candidateVotes.map((v) => v.voter_name)
+              voters: candidateVotes.map((v) => v.voter_name_snapshot || v.voter_name)
             }
           }) || []
 
@@ -478,8 +504,12 @@ export const VotingDatabaseService = {
       })
 
       // 4. 统计总投票人数
-      const voterSet = new Set(votes?.map((v) => v.voter_fingerprint) || [])
-      const voterNames = Array.from(new Set(votes?.map((v) => v.voter_name) || []))
+      const voterSet = new Set(
+        votes?.map((v) => v.voter_user_id || v.voter_fingerprint_hash || v.voter_fingerprint).filter(Boolean) || []
+      )
+      const voterNames = Array.from(
+        new Set(votes?.map((v) => v.voter_name_snapshot || v.voter_name).filter(Boolean) || [])
+      )
 
       return {
         session,
@@ -530,15 +560,15 @@ export const VotingDatabaseService = {
   /**
    * 检查用户是否已投票
    */
-  async hasVoted(sessionId: string, fingerprint: string): Promise<boolean> {
+  async hasVoted(sessionId: string, userId: string): Promise<boolean> {
     try {
-      console.log('检查投票状态 - sessionId:', sessionId, 'fingerprint:', fingerprint)
+      console.log('检查投票状态 - sessionId:', sessionId, 'userId:', userId)
 
       const {data, error} = await supabase
         .from('votes')
         .select('id')
         .eq('voting_session_id', sessionId)
-        .eq('voter_fingerprint', fingerprint)
+        .or(buildVoteIdentityFilter(userId))
         .limit(1)
 
       if (error) {
@@ -562,14 +592,14 @@ export const VotingDatabaseService = {
    */
   async getUserVotes(
     sessionId: string,
-    fingerprint: string
+    userId: string
   ): Promise<{groupId: string; candidateIds: string[]}[] | null> {
     try {
       const {data, error} = await supabase
         .from('votes')
         .select('voting_group_id, candidate_id')
         .eq('voting_session_id', sessionId)
-        .eq('voter_fingerprint', fingerprint)
+        .or(buildVoteIdentityFilter(userId))
 
       if (error) {
         console.error('获取用户投票记录失败:', error)
@@ -629,6 +659,8 @@ export const VotingDatabaseService = {
         return {success: false, error: '请至少选择一位候选人'}
       }
 
+      const voterIdentityKey = getVoterIdentityKey(submission.voterUserId)
+
       const votesData: any[] = []
       normalizedSelections.forEach((selection) => {
         selection.candidateIds.forEach((candidateId) => {
@@ -636,6 +668,7 @@ export const VotingDatabaseService = {
             id: generateId('vote'),
             voting_group_id: selection.groupId,
             candidate_id: candidateId,
+            voter_name_snapshot: submission.voterNameSnapshot || '微信用户',
             created_at: Date.now()
           })
         })
@@ -644,7 +677,7 @@ export const VotingDatabaseService = {
       // 3. 调用原子性RPC函数（删除+插入在一个事务中）
       const {data, error} = await supabase.rpc('update_vote_atomic', {
         p_voting_session_id: submission.votingSessionId,
-        p_voter_fingerprint: submission.voterFingerprint,
+        p_voter_fingerprint: voterIdentityKey,
         p_meeting_id: session.meetingId,
         p_votes: votesData
       })

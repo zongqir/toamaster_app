@@ -210,6 +210,7 @@ export default function HistoryPage() {
       id: generateId('session'),
       createdAt: Date.now(),
       isCompleted: false,
+      impromptuRecords: [],
       metadata: {
         ...session.metadata,
         meetingNo: newMeetingNo,

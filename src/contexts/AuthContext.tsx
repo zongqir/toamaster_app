@@ -1,21 +1,47 @@
 import type {User} from '@supabase/supabase-js'
 import Taro from '@tarojs/taro'
 import {createContext, type ReactNode, useContext, useEffect, useState} from 'react'
-import {AgendaV2DatabaseService} from '@/db/agendaV2Database'
 import {supabase} from '@/client/supabase'
+import {AgendaV2DatabaseService} from '@/db/agendaV2Database'
 
 export interface Profile {
   [key: string]: unknown
 }
 
+function getAgendaIdentityAppId() {
+  try {
+    const accountInfo = Taro.getAccountInfoSync?.()
+    const miniProgramAppId = accountInfo?.miniProgram?.appId
+    if (miniProgramAppId) {
+      return miniProgramAppId
+    }
+  } catch {
+    // Fall through to the stable local fallback.
+  }
+
+  return 'toamaster_app'
+}
+
 export async function getProfile(userId: string): Promise<Profile | null> {
-  const {data, error} = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle()
+  const {data, error} = await supabase.from('user_identity_profiles').select('*').eq('user_id', userId).maybeSingle()
 
   if (error) {
     console.error('Failed to fetch user profile:', error)
     return null
   }
-  return data
+
+  if (!data) {
+    return null
+  }
+
+  // Preserve a few common profile-shaped aliases so existing UI does not care
+  // whether the source is the legacy `profiles` table or Agenda V2 identity data.
+  return {
+    ...data,
+    id: data.user_id,
+    name: data.display_name,
+    nickname: data.display_name
+  }
 }
 
 async function syncAgendaIdentityProfile(user: User) {
@@ -48,11 +74,10 @@ async function syncAgendaIdentityProfile(user: User) {
       null
 
     const nameSource = nicknameFromWechat ? 'wechat_profile' : 'unknown'
-    const appId = (process.env.TARO_APP_WECHAT_APP_ID || process.env.TARO_APP_APP_ID || 'toamaster_app') as string
 
     const result = await AgendaV2DatabaseService.upsertUserIdentityProfile({
       user_id: user.id,
-      app_id: appId,
+      app_id: getAgendaIdentityAppId(),
       wechat_openid: wechatOpenId,
       wechat_unionid: wechatUnionId,
       display_name: displayName,
@@ -67,6 +92,11 @@ async function syncAgendaIdentityProfile(user: User) {
   } catch (error) {
     console.warn('同步用户身份资料异常:', error)
   }
+}
+
+async function loadIdentityProfile(user: User): Promise<Profile | null> {
+  await syncAgendaIdentityProfile(user)
+  return getProfile(user.id)
 }
 
 interface AuthContextType {
@@ -96,7 +126,7 @@ export function AuthProvider({children}: {children: ReactNode}) {
       return
     }
 
-    const profileData = await getProfile(user.id)
+    const profileData = await loadIdentityProfile(user)
     setProfile(profileData)
   }
 
@@ -106,8 +136,7 @@ export function AuthProvider({children}: {children: ReactNode}) {
       .then(({data: {session}}) => {
         setUser(session?.user ?? null)
         if (session?.user) {
-          void syncAgendaIdentityProfile(session.user)
-          getProfile(session.user.id).then(setProfile)
+          loadIdentityProfile(session.user).then(setProfile)
         }
         setLoading(false)
       })
@@ -124,8 +153,7 @@ export function AuthProvider({children}: {children: ReactNode}) {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null)
       if (session?.user) {
-        void syncAgendaIdentityProfile(session.user)
-        getProfile(session.user.id).then(setProfile)
+        loadIdentityProfile(session.user).then(setProfile)
       } else {
         setProfile(null)
       }
@@ -205,45 +233,71 @@ export function AuthProvider({children}: {children: ReactNode}) {
 
   const signInWithWechat = async () => {
     try {
+      console.log('[wechat-login] signInWithWechat:start', {
+        env: Taro.getEnv()
+      })
+
       // Check if running in WeChat Mini Program environment
       if (Taro.getEnv() !== Taro.ENV_TYPE.WEAPP) {
         throw new Error('仅支持微信小程序登录，网页端请使用用户名密码登录')
       }
 
-      // Get WeChat login code
-      const loginResult = await Taro.login()
-      if (!loginResult?.code) {
-        throw new Error('微信登录失败：未获取到 code')
-      }
-
-      // 显式拉取微信昵称/头像，用于“谁修改了议程”的可追溯展示
+      // 必须在用户点击手势上下文中直接调用，否则微信会拒绝弹出授权。
       let profilePayload: {nickname?: string; avatarUrl?: string} | null = null
       try {
+        console.log('[wechat-login] calling Taro.getUserProfile')
         const profileResult = await Taro.getUserProfile({
           desc: '用于记录会议操作人昵称与头像'
+        })
+        console.log('[wechat-login] Taro.getUserProfile:success', {
+          hasNickName: Boolean(profileResult?.userInfo?.nickName),
+          hasAvatarUrl: Boolean(profileResult?.userInfo?.avatarUrl),
+          errMsg: (profileResult as {errMsg?: string} | undefined)?.errMsg
         })
         profilePayload = {
           nickname: profileResult?.userInfo?.nickName || undefined,
           avatarUrl: profileResult?.userInfo?.avatarUrl || undefined
         }
       } catch (profileError) {
+        console.error('[wechat-login] Taro.getUserProfile:failed', profileError)
         throw new Error(
-          `需要授权微信昵称后才能登录：${
-            profileError instanceof Error ? profileError.message : '未授权获取昵称头像'
-          }`
+          `需要授权微信昵称后才能登录：${profileError instanceof Error ? profileError.message : '未授权获取昵称头像'}`
         )
       }
 
+      // Get WeChat login code
+      console.log('[wechat-login] calling Taro.login')
+      const loginResult = await Taro.login()
+      console.log('[wechat-login] Taro.login:result', {
+        hasCode: Boolean(loginResult?.code),
+        errMsg: (loginResult as {errMsg?: string} | undefined)?.errMsg
+      })
+      if (!loginResult?.code) {
+        throw new Error('微信登录失败：未获取到 code')
+      }
+
       // Call backend Edge Function for login
+      console.log('[wechat-login] calling wechat-miniprogram-login', {
+        hasCode: Boolean(loginResult.code),
+        hasProfile: Boolean(profilePayload),
+        hasNickname: Boolean(profilePayload?.nickname),
+        hasAvatarUrl: Boolean(profilePayload?.avatarUrl)
+      })
       const {data, error} = await supabase.functions.invoke('wechat-miniprogram-login', {
         body: {
           code: loginResult.code,
           profile: profilePayload
         }
       })
+      console.log('[wechat-login] wechat-miniprogram-login:result', {
+        hasData: Boolean(data),
+        hasError: Boolean(error),
+        tokenPresent: Boolean(data?.token)
+      })
 
       if (error) {
         const errorMsg = (await error?.context?.text?.()) || error.message
+        console.error('[wechat-login] wechat-miniprogram-login:error', errorMsg)
         throw new Error(errorMsg)
       }
       if (!data?.token) {
@@ -251,14 +305,20 @@ export function AuthProvider({children}: {children: ReactNode}) {
       }
 
       // Verify OTP token
+      console.log('[wechat-login] calling supabase.auth.verifyOtp')
       const {error: verifyError} = await supabase.auth.verifyOtp({
         token_hash: data.token,
         type: 'email'
       })
+      console.log('[wechat-login] supabase.auth.verifyOtp:result', {
+        hasError: Boolean(verifyError)
+      })
 
       if (verifyError) throw verifyError
+      console.log('[wechat-login] signInWithWechat:success')
       return {error: null}
     } catch (error) {
+      console.error('[wechat-login] signInWithWechat:failed', error)
       return {error: error as Error}
     }
   }

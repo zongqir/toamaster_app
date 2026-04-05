@@ -5,11 +5,32 @@ export type AgendaStatusCode = 'initial' | 'qualified' | 'warning' | 'overtime' 
 export type AgendaStatusColor = 'blue' | 'green' | 'yellow' | 'red' | 'red_soft' | 'purple'
 export type AgendaRuleProfile = 'gt5m' | 'lte5m'
 export type ActorNameSource = 'wechat_profile' | 'manual_input' | 'unknown'
-export type AgendaOpType = 'create_item' | 'update_item' | 'delete_item' | 'move_item' | 'timer_checkpoint' | 'status_change'
+export type AgendaOpType =
+  | 'create_item'
+  | 'update_item'
+  | 'delete_item'
+  | 'move_item'
+  | 'timer_checkpoint'
+  | 'status_change'
 export type AgendaOpApplyStatus = 'applied' | 'conflict' | 'rejected' | 'replayed'
 export type AgendaLivePhase = 'host_opening' | 'prep' | 'speech' | 'host_bridge' | 'host_closing' | 'other'
 export type ObserverRole = 'timer_officer' | 'grammarian' | 'ah_counter' | 'host' | 'other'
-export type GrammarNoteType = 'good_word' | 'good_phrase' | 'great_sentence' | 'grammar_issue'
+export type TimerOfficerEventType =
+  | 'start_item'
+  | 'pause_item'
+  | 'adjust_time'
+  | 'reset_item'
+  | 'next_item'
+  | 'prev_item'
+  | 'jump_item'
+  | 'complete_meeting'
+export type GrammarNoteType =
+  | 'good_word'
+  | 'good_phrase'
+  | 'great_sentence'
+  | 'humorous_sentence'
+  | 'other_sentence'
+  | 'grammar_issue'
 export type MeetingRole = 'timer_officer' | 'grammarian' | 'ah_counter' | 'voting_admin' | 'viewer'
 export type VoteTraceMode = 'anonymous' | 'auditable_private' | 'named'
 export type AgendaRpcErrorCode =
@@ -99,6 +120,22 @@ export interface MeetingLiveCursorV2 {
   updated_at: number
 }
 
+export interface TimerOfficerEventV2 {
+  id: string
+  meeting_id: string
+  item_key?: string | null
+  participant_key?: string | null
+  event_type: TimerOfficerEventType
+  current_phase: AgendaLivePhase
+  remaining_seconds?: number | null
+  agenda_version: number
+  payload: Record<string, unknown>
+  operator_user_id?: string | null
+  operator_name: string
+  operator_name_source: ActorNameSource
+  created_at: number
+}
+
 export interface AgendaOpV2 {
   op_id: string
   meeting_id: string
@@ -139,6 +176,22 @@ export interface AhCounterRecordV2 {
   filler_word: string
   hit_count: number
   sample_quote?: string | null
+  related_item_key?: string | null
+  observer_user_id?: string | null
+  observer_name: string
+  observer_role: ObserverRole
+  row_version: number
+  created_at: number
+  updated_at: number
+  deleted_at?: number | null
+}
+
+export interface WordOfDayHitV2 {
+  id: string
+  meeting_id: string
+  participant_key: string
+  word_text: string
+  hit_count: number
   related_item_key?: string | null
   observer_user_id?: string | null
   observer_name: string

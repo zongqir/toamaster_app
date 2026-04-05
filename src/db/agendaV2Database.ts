@@ -1,20 +1,23 @@
 import {supabase} from '../client/supabase'
-import type {MeetingSession} from '../types/meeting'
 import type {
-  AgendaOpInput,
   AgendaItemV2,
   AgendaMutationActor,
+  AgendaOpInput,
   AgendaOpV2,
-  ApplyAgendaOpsResult,
   AgendaServiceResult,
   AhCounterRecordV2,
+  ApplyAgendaOpsResult,
   GrammarianNoteV2,
   MeetingLiveCursorV2,
   MeetingParticipantV2,
   MeetingRole,
   MeetingRoleAssignmentV2,
-  UserIdentityProfileV2
+  TimerOfficerEventV2,
+  UserIdentityProfileV2,
+  WordOfDayHitV2
 } from '../types/agendaV2'
+import type {ImpromptuSpeechRecord, MeetingSession} from '../types/meeting'
+import {buildAgendaPlacements, getAgendaItemType} from '../utils/agendaBusiness'
 
 const UNKNOWN_ACTOR_NAME = '未知用户'
 
@@ -37,12 +40,107 @@ function toErrorMessage(error: unknown, fallback: string) {
   return fallback
 }
 
+function extractErrorDetails(error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return {message: typeof error === 'string' ? error : undefined}
+  }
+
+  const record = error as Record<string, unknown>
+  return {
+    message: typeof record.message === 'string' ? record.message : undefined,
+    details: typeof record.details === 'string' ? record.details : undefined,
+    hint: typeof record.hint === 'string' ? record.hint : undefined,
+    code: typeof record.code === 'string' ? record.code : undefined,
+    name: typeof record.name === 'string' ? record.name : undefined,
+    status: typeof record.status === 'number' ? record.status : undefined
+  }
+}
+
+function isVersionConflictError(error: unknown) {
+  const details = extractErrorDetails(error)
+  if (details.code === 'VERSION_CONFLICT' || details.code === 'ROW_VERSION_CONFLICT') {
+    return true
+  }
+
+  const message = details.message || (typeof error === 'string' ? error : '')
+  return message.includes('VERSION_CONFLICT') || message.includes('ROW_VERSION_CONFLICT')
+}
+
+function logAgendaError(context: string, error: unknown, extra?: Record<string, unknown>) {
+  const logMethod = isVersionConflictError(error) ? console.warn : console.error
+  logMethod(`[agenda-v2] ${context}`, {
+    ...extractErrorDetails(error),
+    raw: error,
+    ...extra
+  })
+}
+
 function normalizeActor(actor?: AgendaMutationActor) {
   return {
     userId: actor?.userId || null,
     name: actor?.name || UNKNOWN_ACTOR_NAME,
     nameSource: actor?.nameSource || 'unknown'
   }
+}
+
+function normalizeParticipantKey(value?: string | null) {
+  return value?.trim() || ''
+}
+
+async function ensureParticipantExists(
+  meetingId: string,
+  participantKey: string | null | undefined,
+  actor: ReturnType<typeof normalizeActor>
+) {
+  const normalizedKey = normalizeParticipantKey(participantKey)
+  if (!normalizedKey) {
+    return {success: true as const, participantKey: null}
+  }
+
+  const {data: existing, error: fetchError} = await supabase
+    .from('meeting_participants_v2')
+    .select('participant_key')
+    .eq('meeting_id', meetingId)
+    .eq('participant_key', normalizedKey)
+    .is('deleted_at', null)
+    .maybeSingle()
+
+  if (fetchError) {
+    logAgendaError('ensureParticipantExists:fetch', fetchError, {
+      meetingId,
+      participantKey: normalizedKey
+    })
+    return {success: false as const, error: fetchError.message}
+  }
+
+  if (existing?.participant_key) {
+    return {success: true as const, participantKey: normalizedKey}
+  }
+
+  const timestamp = nowMs()
+  const {error: upsertError} = await supabase.from('meeting_participants_v2').upsert(
+    {
+      meeting_id: meetingId,
+      participant_key: normalizedKey,
+      display_name: normalizedKey,
+      role_tags: ['speaker'],
+      created_by_user_id: actor.userId,
+      created_at: timestamp,
+      updated_at: timestamp,
+      deleted_at: null
+    },
+    {onConflict: 'meeting_id,participant_key'}
+  )
+
+  if (upsertError) {
+    logAgendaError('ensureParticipantExists:upsert', upsertError, {
+      meetingId,
+      participantKey: normalizedKey
+    })
+    return {success: false as const, error: upsertError.message}
+  }
+
+  return {success: true as const, participantKey: normalizedKey}
 }
 
 type CreateAgendaItemInput = {
@@ -100,6 +198,18 @@ type AppendAgendaOpInput = {
   actor?: AgendaMutationActor
 }
 
+type AppendTimerOfficerEventInput = {
+  meetingId: string
+  agendaVersion: number
+  eventType: TimerOfficerEventV2['event_type']
+  itemKey?: string | null
+  participantKey?: string | null
+  currentPhase?: TimerOfficerEventV2['current_phase']
+  remainingSeconds?: number | null
+  payload?: Record<string, unknown>
+  actor?: AgendaMutationActor
+}
+
 type CreateGrammarianNoteInput = {
   meetingId: string
   participantKey: string
@@ -119,6 +229,102 @@ type CreateAhCounterRecordInput = {
   actor?: AgendaMutationActor
 }
 
+type DecrementAhCounterRecordInput = {
+  id: string
+  actor?: AgendaMutationActor
+}
+
+type AdjustAhCounterRecordByWordInput = {
+  meetingId: string
+  participantKey: string
+  fillerWord: string
+  delta: number
+  sampleQuote?: string | null
+  relatedItemKey?: string | null
+  actor?: AgendaMutationActor
+}
+
+type CreateWordOfDayHitInput = {
+  meetingId: string
+  participantKey: string
+  wordText: string
+  delta: 1 | -1
+  relatedItemKey?: string | null
+  actor?: AgendaMutationActor
+}
+
+type AdjustWordOfDayHitInput = {
+  meetingId: string
+  participantKey: string
+  wordText: string
+  delta: number
+  relatedItemKey?: string | null
+  actor?: AgendaMutationActor
+}
+
+type CreateImpromptuSpeechRecordInput = {
+  meetingId: string
+  agendaItemId: string
+  speakerName: string
+  sortOrder: number
+  poolDurationSeconds?: number
+  speechPlannedDurationSeconds?: number
+  actor?: AgendaMutationActor
+}
+
+type UpdateImpromptuSpeechRecordInput = {
+  id: string
+  meetingId: string
+  patch: Partial<{
+    speakerName: string
+    speakerKey: string
+    status: ImpromptuSpeechRecord['status']
+    poolDurationSeconds: number
+    poolRemainingSecondsAtStart: number | null
+    startedWithLowRemaining: boolean
+    speechPlannedDurationSeconds: number
+    speechStartedAt: number | null
+    speechEndedAt: number | null
+    speechDurationSeconds: number | null
+    isOvertime: boolean | null
+    notes: string | null
+    deletedAt: number | null
+  }>
+  actor?: AgendaMutationActor
+}
+
+function mapImpromptuSpeechRecord(row: Record<string, unknown>): ImpromptuSpeechRecord {
+  return {
+    id: String(row.id),
+    meetingId: String(row.meeting_id),
+    agendaItemId: String(row.agenda_item_id),
+    sortOrder: Number(row.sort_order || 0),
+    speakerName: String(row.speaker_name || ''),
+    speakerKey: String(row.speaker_key || ''),
+    status: row.status as ImpromptuSpeechRecord['status'],
+    poolDurationSeconds: Number(row.pool_duration_seconds || 1500),
+    poolRemainingSecondsAtStart:
+      row.pool_remaining_seconds_at_start === null || row.pool_remaining_seconds_at_start === undefined
+        ? undefined
+        : Number(row.pool_remaining_seconds_at_start),
+    startedWithLowRemaining: Boolean(row.started_with_low_remaining),
+    speechPlannedDurationSeconds: Number(row.speech_planned_duration_seconds || 120),
+    speechStartedAt:
+      row.speech_started_at === null || row.speech_started_at === undefined ? undefined : Number(row.speech_started_at),
+    speechEndedAt:
+      row.speech_ended_at === null || row.speech_ended_at === undefined ? undefined : Number(row.speech_ended_at),
+    speechDurationSeconds:
+      row.speech_duration_seconds === null || row.speech_duration_seconds === undefined
+        ? undefined
+        : Number(row.speech_duration_seconds),
+    isOvertime: row.is_overtime === null || row.is_overtime === undefined ? undefined : Boolean(row.is_overtime),
+    notes: typeof row.notes === 'string' ? row.notes : undefined,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    deletedAt: row.deleted_at === null || row.deleted_at === undefined ? undefined : Number(row.deleted_at)
+  }
+}
+
 export const AgendaV2DatabaseService = {
   async applyAgendaOps(input: {
     meetingId: string
@@ -135,11 +341,21 @@ export const AgendaV2DatabaseService = {
       })
 
       if (error) {
+        logAgendaError('applyAgendaOps:rpc', error, {
+          meetingId: input.meetingId,
+          baseAgendaVersion: input.baseAgendaVersion,
+          ops: input.ops
+        })
         return {success: false, error: error.message}
       }
 
       const result = (data || {}) as ApplyAgendaOpsResult
       if (!result.success) {
+        logAgendaError('applyAgendaOps:result', result, {
+          meetingId: input.meetingId,
+          baseAgendaVersion: input.baseAgendaVersion,
+          ops: input.ops
+        })
         return {
           success: false,
           error: result.error || result.code || 'APPLY_AGENDA_OPS_FAILED',
@@ -163,6 +379,7 @@ export const AgendaV2DatabaseService = {
         .order('order_index', {ascending: true})
 
       if (error) {
+        logAgendaError('listAgendaItems', error, {meetingId})
         return {success: false, error: error.message}
       }
 
@@ -183,6 +400,7 @@ export const AgendaV2DatabaseService = {
         .is('deleted_at', null)
 
       if (countError) {
+        logAgendaError('bootstrapAgendaFromSession:count', countError, {meetingId: session.id})
         return {success: false, error: countError.message}
       }
 
@@ -196,6 +414,7 @@ export const AgendaV2DatabaseService = {
           .maybeSingle()
 
         if (meetingVersionError) {
+          logAgendaError('bootstrapAgendaFromSession:meetingVersion', meetingVersionError, {meetingId: session.id})
           return {success: false, error: meetingVersionError.message}
         }
 
@@ -209,37 +428,43 @@ export const AgendaV2DatabaseService = {
       }
 
       const timestamp = nowMs()
-      const rows = session.items.map((item, index) => ({
-        meeting_id: session.id,
-        item_key: item.id,
-        parent_item_key: null,
-        node_kind: 'leaf',
-        depth: 1,
-        order_index: index,
-        title: item.title,
-        speaker: item.speaker || null,
-        speaker_role: item.speaker ? 'speaker' : 'host',
-        planned_duration: item.plannedDuration,
-        budget_mode: 'independent',
-        consume_parent_budget: true,
-        actual_duration: item.actualDuration ?? null,
-        actual_start_time: item.actualStartTime ?? null,
-        actual_end_time: item.actualEndTime ?? null,
-        start_time: item.startTime || null,
-        item_type: item.type || 'other',
-        rule_id: item.ruleId || 'short',
-        disabled: Boolean(item.disabled),
-        parent_title: item.parentTitle || null,
-        status_code: 'initial',
-        status_color: 'blue',
-        status_rule_profile: item.plannedDuration > 300 ? 'gt5m' : 'lte5m',
-        status_updated_at: timestamp,
-        created_by_name: UNKNOWN_ACTOR_NAME,
-        updated_by_name: UNKNOWN_ACTOR_NAME,
-        updated_by_name_source: 'unknown',
-        created_at: timestamp,
-        updated_at: timestamp
-      }))
+      const placements = buildAgendaPlacements(session.items)
+      const rows = session.items.map((item, index) => {
+        const placement = placements.get(item.id)
+        return {
+          meeting_id: session.id,
+          item_key: item.id,
+          parent_item_key: placement?.parentItemKey ?? null,
+          node_kind: placement?.nodeKind || 'leaf',
+          depth: placement?.depth ?? 1,
+          order_index: placement?.orderIndex ?? index,
+          title: item.title,
+          speaker: item.speaker || null,
+          speaker_role: item.speaker ? 'speaker' : 'host',
+          planned_duration: item.plannedDuration,
+          slot_group_key: item.slotGroupKey || null,
+          budget_mode: placement?.budgetMode || 'independent',
+          budget_limit_seconds: placement?.budgetLimitSeconds ?? null,
+          consume_parent_budget: placement?.consumeParentBudget ?? true,
+          actual_duration: item.actualDuration ?? null,
+          actual_start_time: item.actualStartTime ?? null,
+          actual_end_time: item.actualEndTime ?? null,
+          start_time: item.startTime || null,
+          item_type: getAgendaItemType(item),
+          rule_id: item.ruleId || 'short',
+          disabled: Boolean(item.disabled),
+          parent_title: item.parentTitle || null,
+          status_code: 'initial',
+          status_color: 'blue',
+          status_rule_profile: item.plannedDuration > 300 ? 'gt5m' : 'lte5m',
+          status_updated_at: timestamp,
+          created_by_name: UNKNOWN_ACTOR_NAME,
+          updated_by_name: UNKNOWN_ACTOR_NAME,
+          updated_by_name_source: 'unknown',
+          created_at: timestamp,
+          updated_at: timestamp
+        }
+      })
 
       if (rows.length > 0) {
         const {error: insertError} = await supabase.from('agenda_items_v2').upsert(rows, {
@@ -247,6 +472,11 @@ export const AgendaV2DatabaseService = {
         })
 
         if (insertError) {
+          logAgendaError('bootstrapAgendaFromSession:upsertRows', insertError, {
+            meetingId: session.id,
+            rowCount: rows.length,
+            rows
+          })
           return {success: false, error: insertError.message}
         }
       }
@@ -276,6 +506,7 @@ export const AgendaV2DatabaseService = {
         .order('updated_at', {ascending: false})
 
       if (error) {
+        logAgendaError('listParticipants', error, {meetingId})
         return {success: false, error: error.message}
       }
 
@@ -294,6 +525,7 @@ export const AgendaV2DatabaseService = {
         .maybeSingle()
 
       if (error) {
+        logAgendaError('getLiveCursor', error, {meetingId})
         return {success: false, error: error.message}
       }
 
@@ -341,6 +573,7 @@ export const AgendaV2DatabaseService = {
         .single()
 
       if (error) {
+        logAgendaError('upsertUserIdentityProfile', error, {payload})
         return {success: false, error: error.message}
       }
 
@@ -375,6 +608,11 @@ export const AgendaV2DatabaseService = {
         .single()
 
       if (error) {
+        logAgendaError('assignMeetingRole', error, {
+          meetingId: input.meetingId,
+          userId: input.userId,
+          role: input.role
+        })
         return {success: false, error: error.message}
       }
 
@@ -427,6 +665,7 @@ export const AgendaV2DatabaseService = {
       const {data, error} = await supabase.from('agenda_items_v2').insert(payload).select('*').single()
 
       if (error) {
+        logAgendaError('createAgendaItem', error, {payload})
         return {success: false, error: error.message}
       }
 
@@ -485,6 +724,12 @@ export const AgendaV2DatabaseService = {
 
       const {data, error} = await updateQuery
       if (error) {
+        logAgendaError('updateAgendaItem', error, {
+          meetingId: input.meetingId,
+          itemKey: input.itemKey,
+          patch: input.patch,
+          expectedRowVersion: input.expectedRowVersion
+        })
         return {success: false, error: error.message}
       }
 
@@ -537,6 +782,11 @@ export const AgendaV2DatabaseService = {
         .eq('row_version', current.row_version)
 
       if (error) {
+        logAgendaError('softDeleteAgendaItem', error, {
+          meetingId: input.meetingId,
+          itemKey: input.itemKey,
+          expectedRowVersion: input.expectedRowVersion
+        })
         return {success: false, error: error.message}
       }
 
@@ -601,6 +851,11 @@ export const AgendaV2DatabaseService = {
         .single()
 
       if (error) {
+        logAgendaError('upsertParticipant', error, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          displayName: input.displayName
+        })
         return {success: false, error: error.message}
       }
 
@@ -615,6 +870,11 @@ export const AgendaV2DatabaseService = {
     const timestamp = nowMs()
 
     try {
+      const participantResult = await ensureParticipantExists(input.meetingId, input.currentParticipantKey, actor)
+      if (!participantResult.success) {
+        return {success: false, error: participantResult.error}
+      }
+
       const {data: existing, error: fetchError} = await supabase
         .from('meeting_live_cursor_v2')
         .select('*')
@@ -633,7 +893,7 @@ export const AgendaV2DatabaseService = {
           {
             meeting_id: input.meetingId,
             current_item_key: input.currentItemKey ?? null,
-            current_participant_key: input.currentParticipantKey ?? null,
+            current_participant_key: participantResult.participantKey,
             current_phase: input.currentPhase || 'other',
             remaining_seconds: input.remainingSeconds ?? null,
             agenda_version: input.agendaVersion,
@@ -648,12 +908,67 @@ export const AgendaV2DatabaseService = {
         .single()
 
       if (error) {
+        logAgendaError('setLiveCursor', error, {
+          meetingId: input.meetingId,
+          currentItemKey: input.currentItemKey,
+          currentParticipantKey: input.currentParticipantKey,
+          currentPhase: input.currentPhase,
+          agendaVersion: input.agendaVersion,
+          remainingSeconds: input.remainingSeconds
+        })
         return {success: false, error: error.message}
       }
 
       return {success: true, data: data as MeetingLiveCursorV2}
     } catch (error) {
       return {success: false, error: toErrorMessage(error, '更新实时游标失败')}
+    }
+  },
+
+  async appendTimerOfficerEvent(
+    input: AppendTimerOfficerEventInput
+  ): Promise<AgendaServiceResult<TimerOfficerEventV2>> {
+    const actor = normalizeActor(input.actor)
+    const timestamp = nowMs()
+
+    try {
+      const participantResult = await ensureParticipantExists(input.meetingId, input.participantKey, actor)
+      if (!participantResult.success) {
+        return {success: false, error: participantResult.error}
+      }
+
+      const {data, error} = await supabase
+        .from('timer_officer_events_v2')
+        .insert({
+          meeting_id: input.meetingId,
+          item_key: input.itemKey ?? null,
+          participant_key: participantResult.participantKey,
+          event_type: input.eventType,
+          current_phase: input.currentPhase || 'other',
+          remaining_seconds: input.remainingSeconds ?? null,
+          agenda_version: input.agendaVersion,
+          payload: input.payload || {},
+          operator_user_id: actor.userId,
+          operator_name: actor.name,
+          operator_name_source: actor.nameSource,
+          created_at: timestamp
+        })
+        .select('*')
+        .single()
+
+      if (error) {
+        logAgendaError('appendTimerOfficerEvent', error, {
+          meetingId: input.meetingId,
+          itemKey: input.itemKey,
+          participantKey: input.participantKey,
+          eventType: input.eventType
+        })
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: data as TimerOfficerEventV2}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '写入时间官事件失败')}
     }
   },
 
@@ -681,6 +996,7 @@ export const AgendaV2DatabaseService = {
       const {data, error} = await supabase.from('agenda_ops_v2').insert(payload).select('*').single()
 
       if (error) {
+        logAgendaError('appendAgendaOp', error, {payload})
         return {success: false, error: error.message}
       }
 
@@ -713,6 +1029,10 @@ export const AgendaV2DatabaseService = {
         .single()
 
       if (error) {
+        logAgendaError('createGrammarianNote', error, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey
+        })
         return {success: false, error: error.message}
       }
 
@@ -727,18 +1047,551 @@ export const AgendaV2DatabaseService = {
     const timestamp = nowMs()
 
     try {
+      const normalizedFillerWord = input.fillerWord.trim()
+      const increment = Math.max(1, input.hitCount || 1)
+      const {data: existing, error: fetchError} = await supabase
+        .from('ah_counter_records_v2')
+        .select('*')
+        .eq('meeting_id', input.meetingId)
+        .eq('participant_key', input.participantKey)
+        .eq('filler_word', normalizedFillerWord)
+        .is('deleted_at', null)
+        .maybeSingle()
+
+      if (fetchError) {
+        logAgendaError('createAhCounterRecord:fetchExisting', fetchError, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          fillerWord: normalizedFillerWord
+        })
+        return {success: false, error: fetchError.message}
+      }
+
+      let data: unknown
+      let error: {message: string} | null = null
+
+      if (!existing) {
+        const insertResult = await supabase
+          .from('ah_counter_records_v2')
+          .insert({
+            meeting_id: input.meetingId,
+            participant_key: input.participantKey,
+            filler_word: normalizedFillerWord,
+            hit_count: increment,
+            sample_quote: input.sampleQuote ?? null,
+            related_item_key: input.relatedItemKey ?? null,
+            observer_user_id: actor.userId,
+            observer_name: actor.name,
+            observer_role: 'ah_counter',
+            created_at: timestamp,
+            updated_at: timestamp
+          })
+          .select('*')
+          .single()
+
+        data = insertResult.data
+        error = insertResult.error
+      } else {
+        const updateResult = await supabase
+          .from('ah_counter_records_v2')
+          .update({
+            hit_count: Number(existing.hit_count || 0) + increment,
+            sample_quote: input.sampleQuote?.trim() ? input.sampleQuote.trim() : (existing.sample_quote ?? null),
+            related_item_key: input.relatedItemKey ?? existing.related_item_key ?? null,
+            observer_user_id: actor.userId,
+            observer_name: actor.name,
+            observer_role: 'ah_counter',
+            updated_at: timestamp,
+            deleted_at: null,
+            row_version: Number(existing.row_version || 1) + 1
+          })
+          .eq('id', existing.id)
+          .eq('row_version', existing.row_version)
+          .select('*')
+          .single()
+
+        data = updateResult.data
+        error = updateResult.error
+      }
+
+      if (error) {
+        logAgendaError('createAhCounterRecord', error, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          fillerWord: normalizedFillerWord
+        })
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: data as AhCounterRecordV2}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '写入哼哈官记录失败')}
+    }
+  },
+
+  async decrementAhCounterRecord(
+    input: DecrementAhCounterRecordInput
+  ): Promise<AgendaServiceResult<AhCounterRecordV2 | null>> {
+    const actor = normalizeActor(input.actor)
+    const timestamp = nowMs()
+
+    try {
+      const {data: existing, error: fetchError} = await supabase
+        .from('ah_counter_records_v2')
+        .select('*')
+        .eq('id', input.id)
+        .is('deleted_at', null)
+        .maybeSingle()
+
+      if (fetchError) {
+        logAgendaError('decrementAhCounterRecord:fetchExisting', fetchError, {id: input.id})
+        return {success: false, error: fetchError.message}
+      }
+
+      if (!existing) {
+        return {success: false, error: 'RECORD_NOT_FOUND'}
+      }
+
+      const nextHitCount = Number(existing.hit_count || 0) - 1
+
+      if (nextHitCount <= 0) {
+        const {error} = await supabase
+          .from('ah_counter_records_v2')
+          .update({
+            deleted_at: timestamp,
+            updated_at: timestamp,
+            observer_user_id: actor.userId,
+            observer_name: actor.name,
+            observer_role: 'ah_counter',
+            row_version: Number(existing.row_version || 1) + 1
+          })
+          .eq('id', existing.id)
+          .eq('row_version', existing.row_version)
+
+        if (error) {
+          logAgendaError('decrementAhCounterRecord:deleteWhenZero', error, {id: input.id})
+          return {success: false, error: error.message}
+        }
+
+        return {success: true, data: null}
+      }
+
       const {data, error} = await supabase
         .from('ah_counter_records_v2')
-        .insert({
-          meeting_id: input.meetingId,
-          participant_key: input.participantKey,
-          filler_word: input.fillerWord,
-          hit_count: Math.max(1, input.hitCount || 1),
-          sample_quote: input.sampleQuote ?? null,
-          related_item_key: input.relatedItemKey ?? null,
+        .update({
+          hit_count: nextHitCount,
+          updated_at: timestamp,
           observer_user_id: actor.userId,
           observer_name: actor.name,
           observer_role: 'ah_counter',
+          row_version: Number(existing.row_version || 1) + 1
+        })
+        .eq('id', existing.id)
+        .eq('row_version', existing.row_version)
+        .select('*')
+        .single()
+
+      if (error) {
+        logAgendaError('decrementAhCounterRecord:update', error, {id: input.id})
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: data as AhCounterRecordV2}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '减少哼哈次数失败')}
+    }
+  },
+
+  async adjustAhCounterRecordByWord(
+    input: AdjustAhCounterRecordByWordInput
+  ): Promise<AgendaServiceResult<AhCounterRecordV2 | null>> {
+    const actor = normalizeActor(input.actor)
+    const timestamp = nowMs()
+    const normalizedFillerWord = input.fillerWord.trim()
+    const delta = Math.trunc(input.delta)
+
+    if (!normalizedFillerWord) {
+      return {success: false, error: 'FILLER_WORD_REQUIRED'}
+    }
+
+    if (!delta) {
+      return {success: true, data: null}
+    }
+
+    try {
+      const {data: existing, error: fetchError} = await supabase
+        .from('ah_counter_records_v2')
+        .select('*')
+        .eq('meeting_id', input.meetingId)
+        .eq('participant_key', input.participantKey)
+        .eq('filler_word', normalizedFillerWord)
+        .is('deleted_at', null)
+        .maybeSingle()
+
+      if (fetchError) {
+        logAgendaError('adjustAhCounterRecordByWord:fetchExisting', fetchError, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          fillerWord: normalizedFillerWord,
+          delta
+        })
+        return {success: false, error: fetchError.message}
+      }
+
+      const existingCount = Number(existing?.hit_count || 0)
+      const nextHitCount = existingCount + delta
+
+      if (!existing) {
+        if (nextHitCount <= 0) {
+          return {success: true, data: null}
+        }
+
+        const {data, error} = await supabase
+          .from('ah_counter_records_v2')
+          .insert({
+            meeting_id: input.meetingId,
+            participant_key: input.participantKey,
+            filler_word: normalizedFillerWord,
+            hit_count: nextHitCount,
+            sample_quote: input.sampleQuote?.trim() ? input.sampleQuote.trim() : null,
+            related_item_key: input.relatedItemKey ?? null,
+            observer_user_id: actor.userId,
+            observer_name: actor.name,
+            observer_role: 'ah_counter',
+            created_at: timestamp,
+            updated_at: timestamp
+          })
+          .select('*')
+          .single()
+
+        if (error) {
+          logAgendaError('adjustAhCounterRecordByWord:insert', error, {
+            meetingId: input.meetingId,
+            participantKey: input.participantKey,
+            fillerWord: normalizedFillerWord,
+            delta
+          })
+          return {success: false, error: error.message}
+        }
+
+        return {success: true, data: data as AhCounterRecordV2}
+      }
+
+      if (nextHitCount <= 0) {
+        const {error} = await supabase
+          .from('ah_counter_records_v2')
+          .update({
+            deleted_at: timestamp,
+            updated_at: timestamp,
+            observer_user_id: actor.userId,
+            observer_name: actor.name,
+            observer_role: 'ah_counter',
+            row_version: Number(existing.row_version || 1) + 1
+          })
+          .eq('id', existing.id)
+          .eq('row_version', existing.row_version)
+
+        if (error) {
+          logAgendaError('adjustAhCounterRecordByWord:deleteWhenZero', error, {
+            meetingId: input.meetingId,
+            participantKey: input.participantKey,
+            fillerWord: normalizedFillerWord,
+            delta
+          })
+          return {success: false, error: error.message}
+        }
+
+        return {success: true, data: null}
+      }
+
+      const {data, error} = await supabase
+        .from('ah_counter_records_v2')
+        .update({
+          hit_count: nextHitCount,
+          sample_quote: input.sampleQuote?.trim() ? input.sampleQuote.trim() : (existing.sample_quote ?? null),
+          related_item_key: input.relatedItemKey ?? existing.related_item_key ?? null,
+          observer_user_id: actor.userId,
+          observer_name: actor.name,
+          observer_role: 'ah_counter',
+          updated_at: timestamp,
+          deleted_at: null,
+          row_version: Number(existing.row_version || 1) + 1
+        })
+        .eq('id', existing.id)
+        .eq('row_version', existing.row_version)
+        .select('*')
+        .single()
+
+      if (error) {
+        logAgendaError('adjustAhCounterRecordByWord:update', error, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          fillerWord: normalizedFillerWord,
+          delta
+        })
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: data as AhCounterRecordV2}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '调整哼哈官记录失败')}
+    }
+  },
+
+  async createWordOfDayHit(input: CreateWordOfDayHitInput): Promise<AgendaServiceResult<WordOfDayHitV2>> {
+    const actor = normalizeActor(input.actor)
+    const timestamp = nowMs()
+
+    try {
+      const {data: existing, error: fetchError} = await supabase
+        .from('word_of_day_hits_v2')
+        .select('*')
+        .eq('meeting_id', input.meetingId)
+        .eq('participant_key', input.participantKey)
+        .eq('word_text', input.wordText)
+        .is('deleted_at', null)
+        .maybeSingle()
+
+      if (fetchError) {
+        logAgendaError('createWordOfDayHit:fetchExisting', fetchError, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          wordText: input.wordText
+        })
+        return {success: false, error: fetchError.message}
+      }
+
+      const nextHitCount = Math.max(0, Number(existing?.hit_count || 0) + input.delta)
+
+      let data: unknown
+      let error: {message: string} | null = null
+
+      if (!existing) {
+        const insertResult = await supabase
+          .from('word_of_day_hits_v2')
+          .insert({
+            meeting_id: input.meetingId,
+            participant_key: input.participantKey,
+            word_text: input.wordText,
+            hit_count: nextHitCount,
+            related_item_key: input.relatedItemKey ?? null,
+            observer_user_id: actor.userId,
+            observer_name: actor.name,
+            observer_role: 'grammarian',
+            created_at: timestamp,
+            updated_at: timestamp
+          })
+          .select('*')
+          .single()
+
+        data = insertResult.data
+        error = insertResult.error
+      } else {
+        const updateResult = await supabase
+          .from('word_of_day_hits_v2')
+          .update({
+            hit_count: nextHitCount,
+            related_item_key: input.relatedItemKey ?? existing.related_item_key ?? null,
+            observer_user_id: actor.userId,
+            observer_name: actor.name,
+            observer_role: 'grammarian',
+            updated_at: timestamp,
+            deleted_at: null,
+            row_version: Number(existing.row_version || 1) + 1
+          })
+          .eq('id', existing.id)
+          .eq('row_version', existing.row_version)
+          .select('*')
+          .single()
+
+        data = updateResult.data
+        error = updateResult.error
+      }
+
+      if (error) {
+        logAgendaError('createWordOfDayHit', error, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          adjustment: input.delta
+        })
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: data as WordOfDayHitV2}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '写入每日一词记录失败')}
+    }
+  },
+
+  async adjustWordOfDayHit(input: AdjustWordOfDayHitInput): Promise<AgendaServiceResult<WordOfDayHitV2 | null>> {
+    const actor = normalizeActor(input.actor)
+    const timestamp = nowMs()
+    const normalizedWordText = input.wordText.trim()
+    const delta = Math.trunc(input.delta)
+
+    if (!normalizedWordText) {
+      return {success: false, error: 'WORD_TEXT_REQUIRED'}
+    }
+
+    if (!delta) {
+      return {success: true, data: null}
+    }
+
+    try {
+      const {data: existing, error: fetchError} = await supabase
+        .from('word_of_day_hits_v2')
+        .select('*')
+        .eq('meeting_id', input.meetingId)
+        .eq('participant_key', input.participantKey)
+        .eq('word_text', normalizedWordText)
+        .is('deleted_at', null)
+        .maybeSingle()
+
+      if (fetchError) {
+        logAgendaError('adjustWordOfDayHit:fetchExisting', fetchError, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          wordText: normalizedWordText,
+          delta
+        })
+        return {success: false, error: fetchError.message}
+      }
+
+      const existingCount = Number(existing?.hit_count || 0)
+      const nextHitCount = Math.max(0, existingCount + delta)
+
+      if (!existing) {
+        if (nextHitCount <= 0) {
+          return {success: true, data: null}
+        }
+
+        const {data, error} = await supabase
+          .from('word_of_day_hits_v2')
+          .insert({
+            meeting_id: input.meetingId,
+            participant_key: input.participantKey,
+            word_text: normalizedWordText,
+            hit_count: nextHitCount,
+            related_item_key: input.relatedItemKey ?? null,
+            observer_user_id: actor.userId,
+            observer_name: actor.name,
+            observer_role: 'grammarian',
+            created_at: timestamp,
+            updated_at: timestamp
+          })
+          .select('*')
+          .single()
+
+        if (error) {
+          logAgendaError('adjustWordOfDayHit:insert', error, {
+            meetingId: input.meetingId,
+            participantKey: input.participantKey,
+            wordText: normalizedWordText,
+            delta
+          })
+          return {success: false, error: error.message}
+        }
+
+        return {success: true, data: data as WordOfDayHitV2}
+      }
+
+      const {data, error} = await supabase
+        .from('word_of_day_hits_v2')
+        .update({
+          hit_count: nextHitCount,
+          related_item_key: input.relatedItemKey ?? existing.related_item_key ?? null,
+          observer_user_id: actor.userId,
+          observer_name: actor.name,
+          observer_role: 'grammarian',
+          updated_at: timestamp,
+          deleted_at: nextHitCount <= 0 ? timestamp : null,
+          row_version: Number(existing.row_version || 1) + 1
+        })
+        .eq('id', existing.id)
+        .eq('row_version', existing.row_version)
+        .select('*')
+        .single()
+
+      if (error) {
+        logAgendaError('adjustWordOfDayHit:update', error, {
+          meetingId: input.meetingId,
+          participantKey: input.participantKey,
+          wordText: normalizedWordText,
+          delta
+        })
+        return {success: false, error: error.message}
+      }
+
+      if (nextHitCount <= 0) {
+        return {success: true, data: null}
+      }
+
+      return {success: true, data: data as WordOfDayHitV2}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '调整每日一词记录失败')}
+    }
+  },
+
+  async listImpromptuSpeechRecords(
+    meetingId: string,
+    agendaItemId?: string
+  ): Promise<AgendaServiceResult<ImpromptuSpeechRecord[]>> {
+    try {
+      let query = supabase
+        .from('impromptu_speeches_v2')
+        .select('*')
+        .eq('meeting_id', meetingId)
+        .is('deleted_at', null)
+        .order('agenda_item_id', {ascending: true})
+        .order('sort_order', {ascending: true})
+        .order('created_at', {ascending: true})
+
+      if (agendaItemId) {
+        query = query.eq('agenda_item_id', agendaItemId)
+      }
+
+      const {data, error} = await query
+
+      if (error) {
+        logAgendaError('listImpromptuSpeechRecords', error, {meetingId, agendaItemId})
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: ((data || []) as Record<string, unknown>[]).map(mapImpromptuSpeechRecord)}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '获取即兴记录失败')}
+    }
+  },
+
+  async createImpromptuSpeechRecord(
+    input: CreateImpromptuSpeechRecordInput
+  ): Promise<AgendaServiceResult<ImpromptuSpeechRecord>> {
+    const actor = normalizeActor(input.actor)
+    const timestamp = nowMs()
+    const speakerName = input.speakerName.trim()
+    const speakerKey = speakerName
+
+    if (!speakerName) {
+      return {success: false, error: 'SPEAKER_NAME_REQUIRED'}
+    }
+
+    const participantResult = await ensureParticipantExists(input.meetingId, speakerKey, actor)
+    if (!participantResult.success) {
+      return {success: false, error: participantResult.error}
+    }
+
+    try {
+      const {data, error} = await supabase
+        .from('impromptu_speeches_v2')
+        .insert({
+          meeting_id: input.meetingId,
+          agenda_item_id: input.agendaItemId,
+          sort_order: input.sortOrder,
+          speaker_name: speakerName,
+          speaker_key: participantResult.participantKey,
+          status: 'pending',
+          pool_duration_seconds: input.poolDurationSeconds || 25 * 60,
+          speech_planned_duration_seconds: input.speechPlannedDurationSeconds || 2 * 60,
           created_at: timestamp,
           updated_at: timestamp
         })
@@ -746,12 +1599,116 @@ export const AgendaV2DatabaseService = {
         .single()
 
       if (error) {
+        logAgendaError('createImpromptuSpeechRecord', error, {
+          meetingId: input.meetingId,
+          agendaItemId: input.agendaItemId,
+          speakerName
+        })
         return {success: false, error: error.message}
       }
 
-      return {success: true, data: data as AhCounterRecordV2}
+      return {success: true, data: mapImpromptuSpeechRecord((data || {}) as Record<string, unknown>)}
     } catch (error) {
-      return {success: false, error: toErrorMessage(error, '写入哼哈官记录失败')}
+      return {success: false, error: toErrorMessage(error, '创建即兴记录失败')}
+    }
+  },
+
+  async updateImpromptuSpeechRecord(
+    input: UpdateImpromptuSpeechRecordInput
+  ): Promise<AgendaServiceResult<ImpromptuSpeechRecord>> {
+    const actor = normalizeActor(input.actor)
+    const timestamp = nowMs()
+    const patch = {...input.patch}
+    let normalizedSpeakerKey: string | null = null
+
+    if (typeof patch.speakerName === 'string') {
+      patch.speakerName = patch.speakerName.trim()
+      if (!patch.speakerName) {
+        return {success: false, error: 'SPEAKER_NAME_REQUIRED'}
+      }
+    }
+
+    if (typeof patch.speakerKey === 'string') {
+      normalizedSpeakerKey = patch.speakerKey.trim()
+    } else if (typeof patch.speakerName === 'string') {
+      normalizedSpeakerKey = patch.speakerName
+    }
+
+    if (normalizedSpeakerKey) {
+      const participantResult = await ensureParticipantExists(input.meetingId, normalizedSpeakerKey, actor)
+      if (!participantResult.success) {
+        return {success: false, error: participantResult.error}
+      }
+      normalizedSpeakerKey = participantResult.participantKey
+    }
+
+    try {
+      const {data, error} = await supabase
+        .from('impromptu_speeches_v2')
+        .update({
+          speaker_name: patch.speakerName,
+          speaker_key: normalizedSpeakerKey ?? undefined,
+          status: patch.status,
+          pool_duration_seconds: patch.poolDurationSeconds,
+          pool_remaining_seconds_at_start: patch.poolRemainingSecondsAtStart,
+          started_with_low_remaining: patch.startedWithLowRemaining,
+          speech_planned_duration_seconds: patch.speechPlannedDurationSeconds,
+          speech_started_at: patch.speechStartedAt,
+          speech_ended_at: patch.speechEndedAt,
+          speech_duration_seconds: patch.speechDurationSeconds,
+          is_overtime: patch.isOvertime,
+          notes: patch.notes,
+          deleted_at: patch.deletedAt,
+          updated_at: timestamp
+        })
+        .eq('id', input.id)
+        .eq('meeting_id', input.meetingId)
+        .select('*')
+        .single()
+
+      if (error) {
+        logAgendaError('updateImpromptuSpeechRecord', error, {
+          id: input.id,
+          meetingId: input.meetingId,
+          patch
+        })
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: mapImpromptuSpeechRecord((data || {}) as Record<string, unknown>)}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '更新即兴记录失败')}
+    }
+  },
+
+  async clearImpromptuSpeechRecords(meetingId: string, agendaItemId?: string): Promise<AgendaServiceResult<number>> {
+    const timestamp = nowMs()
+
+    try {
+      let query = supabase
+        .from('impromptu_speeches_v2')
+        .update({
+          deleted_at: timestamp,
+          updated_at: timestamp,
+          status: 'cancelled'
+        })
+        .eq('meeting_id', meetingId)
+        .is('deleted_at', null)
+
+      if (agendaItemId) {
+        query = query.eq('agenda_item_id', agendaItemId)
+      }
+
+      const {data, error} = await query.select('id')
+
+      if (error) {
+        logAgendaError('clearImpromptuSpeechRecords', error, {meetingId, agendaItemId})
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: (data || []).length}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '清空即兴记录失败')}
     }
   },
 
@@ -765,6 +1722,7 @@ export const AgendaV2DatabaseService = {
         .order('created_at', {ascending: false})
 
       if (error) {
+        logAgendaError('listGrammarianNotes', error, {meetingId})
         return {success: false, error: error.message}
       }
 
@@ -780,16 +1738,38 @@ export const AgendaV2DatabaseService = {
         .from('ah_counter_records_v2')
         .select('*')
         .eq('meeting_id', meetingId)
+        .gt('hit_count', 0)
         .is('deleted_at', null)
-        .order('created_at', {ascending: false})
+        .order('updated_at', {ascending: false})
 
       if (error) {
+        logAgendaError('listAhCounterRecords', error, {meetingId})
         return {success: false, error: error.message}
       }
 
       return {success: true, data: (data || []) as AhCounterRecordV2[]}
     } catch (error) {
       return {success: false, error: toErrorMessage(error, '获取哼哈官记录失败')}
+    }
+  },
+
+  async listWordOfDayHits(meetingId: string): Promise<AgendaServiceResult<WordOfDayHitV2[]>> {
+    try {
+      const {data, error} = await supabase
+        .from('word_of_day_hits_v2')
+        .select('*')
+        .eq('meeting_id', meetingId)
+        .is('deleted_at', null)
+        .order('updated_at', {ascending: false})
+
+      if (error) {
+        logAgendaError('listWordOfDayHits', error, {meetingId})
+        return {success: false, error: error.message}
+      }
+
+      return {success: true, data: (data || []) as WordOfDayHitV2[]}
+    } catch (error) {
+      return {success: false, error: toErrorMessage(error, '获取每日一词记录失败')}
     }
   }
 }

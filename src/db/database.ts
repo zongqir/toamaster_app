@@ -1,5 +1,6 @@
 import {supabase} from '../client/supabase'
-import type {MeetingItem, MeetingMetadata, MeetingSession} from '../types/meeting'
+import type {ImpromptuSpeechRecord, MeetingItem, MeetingMetadata, MeetingSession} from '../types/meeting'
+import {flattenAgendaTree, resolveMeetingItemType} from '../utils/agendaBusiness'
 
 /**
  * 数据库会议记录类型
@@ -46,6 +47,7 @@ interface DBMeetingItem {
 interface DBAgendaItemV2 {
   meeting_id: string
   item_key: string
+  parent_item_key: string | null
   title: string
   speaker: string | null
   planned_duration: number
@@ -57,8 +59,57 @@ interface DBAgendaItemV2 {
   rule_id: string
   disabled: boolean
   parent_title: string | null
+  slot_group_key: string | null
+  budget_limit_seconds: number | null
+  consume_parent_budget: boolean | null
   order_index: number
   deleted_at: number | null
+}
+
+interface DBImpromptuSpeechV2 {
+  id: string
+  meeting_id: string
+  agenda_item_id: string
+  sort_order: number
+  speaker_name: string
+  speaker_key: string
+  status: ImpromptuSpeechRecord['status']
+  pool_duration_seconds: number
+  pool_remaining_seconds_at_start: number | null
+  started_with_low_remaining: boolean
+  speech_planned_duration_seconds: number
+  speech_started_at: number | null
+  speech_ended_at: number | null
+  speech_duration_seconds: number | null
+  is_overtime: boolean | null
+  notes: string | null
+  created_at: number
+  updated_at: number
+  deleted_at: number | null
+}
+
+function extractErrorDetails(error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return {message: typeof error === 'string' ? error : undefined}
+  }
+
+  const record = error as Record<string, unknown>
+  return {
+    message: typeof record.message === 'string' ? record.message : undefined,
+    details: typeof record.details === 'string' ? record.details : undefined,
+    hint: typeof record.hint === 'string' ? record.hint : undefined,
+    code: typeof record.code === 'string' ? record.code : undefined,
+    name: typeof record.name === 'string' ? record.name : undefined,
+    status: typeof record.status === 'number' ? record.status : undefined
+  }
+}
+
+function logDatabaseError(context: string, error: unknown, extra?: Record<string, unknown>) {
+  console.error(`[database] ${context}`, {
+    ...extractErrorDetails(error),
+    raw: error,
+    ...extra
+  })
 }
 
 function mapLegacyItemToMeetingItem(item: DBMeetingItem): MeetingItem {
@@ -79,6 +130,7 @@ function mapLegacyItemToMeetingItem(item: DBMeetingItem): MeetingItem {
 }
 
 function mapAgendaV2ItemToMeetingItem(item: DBAgendaItemV2): MeetingItem {
+  const resolvedType = resolveMeetingItemType(item.item_type)
   return {
     id: item.item_key,
     title: item.title,
@@ -88,10 +140,39 @@ function mapAgendaV2ItemToMeetingItem(item: DBAgendaItemV2): MeetingItem {
     actualStartTime: item.actual_start_time || undefined,
     actualEndTime: item.actual_end_time || undefined,
     startTime: item.start_time || undefined,
-    type: item.item_type as MeetingItem['type'],
+    type: resolvedType.type,
     ruleId: item.rule_id,
     disabled: item.disabled,
-    parentTitle: item.parent_title || undefined
+    parentTitle: item.parent_title || undefined,
+    businessType: resolvedType.businessType,
+    agendaParentItemId: item.parent_item_key || undefined,
+    slotGroupKey: item.slot_group_key || undefined,
+    budgetLimitSeconds: item.budget_limit_seconds || undefined,
+    consumeParentBudget: item.consume_parent_budget ?? undefined
+  }
+}
+
+function mapImpromptuSpeechV2ToRecord(item: DBImpromptuSpeechV2): ImpromptuSpeechRecord {
+  return {
+    id: item.id,
+    meetingId: item.meeting_id,
+    agendaItemId: item.agenda_item_id,
+    sortOrder: item.sort_order,
+    speakerName: item.speaker_name,
+    speakerKey: item.speaker_key,
+    status: item.status,
+    poolDurationSeconds: item.pool_duration_seconds,
+    poolRemainingSecondsAtStart: item.pool_remaining_seconds_at_start ?? undefined,
+    startedWithLowRemaining: item.started_with_low_remaining,
+    speechPlannedDurationSeconds: item.speech_planned_duration_seconds,
+    speechStartedAt: item.speech_started_at ?? undefined,
+    speechEndedAt: item.speech_ended_at ?? undefined,
+    speechDurationSeconds: item.speech_duration_seconds ?? undefined,
+    isOvertime: item.is_overtime ?? undefined,
+    notes: item.notes || undefined,
+    createdAt: item.created_at,
+    updatedAt: item.updated_at,
+    deletedAt: item.deleted_at ?? undefined
   }
 }
 
@@ -137,7 +218,7 @@ export const DatabaseService = {
       })
 
       if (meetingError) {
-        console.error('保存会议失败:', meetingError)
+        logDatabaseError('saveMeeting:meetingUpsert', meetingError, {meetingId: session.id, meetingData})
         return {success: false, error: meetingError.message}
       }
 
@@ -163,7 +244,7 @@ export const DatabaseService = {
       const {error: deleteError} = await supabase.from('meeting_items').delete().eq('meeting_id', session.id)
 
       if (deleteError) {
-        console.error('删除旧环节失败:', deleteError)
+        logDatabaseError('saveMeeting:deleteLegacyItems', deleteError, {meetingId: session.id})
       }
 
       // 保存新的环节数据
@@ -173,13 +254,17 @@ export const DatabaseService = {
       })
 
       if (itemsError) {
-        console.error('保存环节失败:', itemsError)
+        logDatabaseError('saveMeeting:itemsUpsert', itemsError, {
+          meetingId: session.id,
+          itemCount: itemsData.length,
+          itemsData
+        })
         return {success: false, error: itemsError.message}
       }
 
       return {success: true}
     } catch (error) {
-      console.error('保存会议异常:', error)
+      logDatabaseError('saveMeeting:exception', error, {meetingId: session.id})
       return {success: false, error: error instanceof Error ? error.message : '未知错误'}
     }
   },
@@ -196,7 +281,7 @@ export const DatabaseService = {
         .order('created_at', {ascending: false})
 
       if (meetingsError) {
-        console.error('获取会议列表失败:', meetingsError)
+        logDatabaseError('getAllMeetings:meetings', meetingsError)
         return []
       }
 
@@ -207,6 +292,7 @@ export const DatabaseService = {
       // 获取所有环节
       const meetingIds = meetings.map((m) => m.id)
       const meetingItemsMap = new Map<string, MeetingItem[]>()
+      const impromptuRecordsMap = new Map<string, ImpromptuSpeechRecord[]>()
       const v2KnownMeetingIds = new Set<string>()
 
       const {data: v2Items, error: v2ItemsError} = await supabase
@@ -217,11 +303,18 @@ export const DatabaseService = {
         .order('order_index', {ascending: true})
 
       if (v2ItemsError) {
-        console.warn('获取 Agenda V2 环节失败，将回退旧表:', v2ItemsError.message)
+        console.warn('[database] getAllMeetings:agendaV2Fallback', {
+          ...extractErrorDetails(v2ItemsError),
+          raw: v2ItemsError,
+          meetingIds
+        })
       } else {
-        ;((v2Items || []) as DBAgendaItemV2[]).forEach((item) => {
+        const orderedV2Items = flattenAgendaTree(
+          ((v2Items || []) as DBAgendaItemV2[]).filter((item) => item.deleted_at === null)
+        )
+
+        orderedV2Items.forEach((item) => {
           v2KnownMeetingIds.add(item.meeting_id)
-          if (item.deleted_at !== null) return
 
           const mapped = mapAgendaV2ItemToMeetingItem(item)
           const current = meetingItemsMap.get(item.meeting_id) || []
@@ -231,6 +324,32 @@ export const DatabaseService = {
       }
 
       const fallbackMeetingIds = meetingIds.filter((meetingId) => !v2KnownMeetingIds.has(meetingId))
+      const {data: impromptuRows, error: impromptuError} = await supabase
+        .from('impromptu_speeches_v2')
+        .select('*')
+        .in('meeting_id', meetingIds)
+        .order('meeting_id', {ascending: true})
+        .order('agenda_item_id', {ascending: true})
+        .order('sort_order', {ascending: true})
+        .order('created_at', {ascending: true})
+
+      if (impromptuError) {
+        console.warn('[database] getAllMeetings:impromptuFallback', {
+          ...extractErrorDetails(impromptuError),
+          raw: impromptuError,
+          meetingIds
+        })
+      } else {
+        ;((impromptuRows || []) as DBImpromptuSpeechV2[])
+          .filter((item) => item.deleted_at === null)
+          .forEach((item) => {
+            const mapped = mapImpromptuSpeechV2ToRecord(item)
+            const current = impromptuRecordsMap.get(item.meeting_id) || []
+            current.push(mapped)
+            impromptuRecordsMap.set(item.meeting_id, current)
+          })
+      }
+
       if (fallbackMeetingIds.length > 0) {
         const {data: legacyItems, error: legacyItemsError} = await supabase
           .from('meeting_items')
@@ -240,7 +359,7 @@ export const DatabaseService = {
           .order('order_index', {ascending: true})
 
         if (legacyItemsError) {
-          console.error('获取旧版环节列表失败:', legacyItemsError)
+          logDatabaseError('getAllMeetings:legacyItems', legacyItemsError, {meetingIds: fallbackMeetingIds})
         } else {
           ;((legacyItems || []) as DBMeetingItem[]).forEach((item) => {
             const mapped = mapLegacyItemToMeetingItem(item)
@@ -271,6 +390,7 @@ export const DatabaseService = {
             meetingLink: meeting.meeting_link || undefined
           },
           items: meetingItems,
+          impromptuRecords: impromptuRecordsMap.get(meeting.id) || [],
           createdAt: meeting.created_at,
           agendaVersion: meeting.agenda_version || 1,
           isCompleted: meeting.is_completed
@@ -279,7 +399,7 @@ export const DatabaseService = {
 
       return sessions
     } catch (error) {
-      console.error('获取会议列表异常:', error)
+      logDatabaseError('getAllMeetings:exception', error)
       return []
     }
   },
@@ -303,6 +423,7 @@ export const DatabaseService = {
 
       // 获取环节列表
       let meetingItems: MeetingItem[] = []
+      let impromptuRecords: ImpromptuSpeechRecord[] = []
       let hasV2Items = false
 
       const {data: v2Items, error: v2ItemsError} = await supabase
@@ -314,9 +435,9 @@ export const DatabaseService = {
       if (v2ItemsError) {
         console.warn('获取 Agenda V2 环节失败，将回退旧表:', v2ItemsError.message)
       } else if ((v2Items || []).length > 0) {
-        meetingItems = ((v2Items || []) as DBAgendaItemV2[])
-          .filter((item) => item.deleted_at === null)
-          .map((item) => mapAgendaV2ItemToMeetingItem(item))
+        meetingItems = flattenAgendaTree(
+          ((v2Items || []) as DBAgendaItemV2[]).filter((item) => item.deleted_at === null)
+        ).map((item) => mapAgendaV2ItemToMeetingItem(item))
         hasV2Items = true
       }
 
@@ -335,6 +456,22 @@ export const DatabaseService = {
         meetingItems = ((legacyItems || []) as DBMeetingItem[]).map((item) => mapLegacyItemToMeetingItem(item))
       }
 
+      const {data: impromptuRows, error: impromptuError} = await supabase
+        .from('impromptu_speeches_v2')
+        .select('*')
+        .eq('meeting_id', id)
+        .order('agenda_item_id', {ascending: true})
+        .order('sort_order', {ascending: true})
+        .order('created_at', {ascending: true})
+
+      if (impromptuError) {
+        console.warn('获取即兴记录失败，将继续返回会议主体:', impromptuError.message)
+      } else {
+        impromptuRecords = ((impromptuRows || []) as DBImpromptuSpeechV2[])
+          .filter((item) => item.deleted_at === null)
+          .map((item) => mapImpromptuSpeechV2ToRecord(item))
+      }
+
       return {
         id: meeting.id,
         metadata: {
@@ -351,6 +488,7 @@ export const DatabaseService = {
           meetingLink: meeting.meeting_link || undefined
         },
         items: meetingItems,
+        impromptuRecords,
         createdAt: meeting.created_at,
         agendaVersion: meeting.agenda_version || 1,
         isCompleted: meeting.is_completed

@@ -1,5 +1,6 @@
 import Taro from '@tarojs/taro'
 import type {AppSettings, MeetingSession, TimerRule} from '../types/meeting'
+import {getMeetingItemBusinessType, IMPROMPTU_BLOCK_DURATION_SECONDS} from '../utils/agendaBusiness'
 
 const SETTINGS_KEY = 'AACTP_TIMER_SETTINGS'
 const SESSIONS_KEY = 'AACTP_TIMER_SESSIONS'
@@ -49,6 +50,62 @@ export type SessionCloudSyncState = {
   updatedAt: number
 }
 
+const EMPTY_CLOUD_SYNC_STATE: SessionCloudSyncState = {
+  status: 'idle',
+  updatedAt: 0
+}
+
+function normalizeStoredSession(session: MeetingSession): MeetingSession {
+  let changed = false
+
+  if (!session || typeof session !== 'object') {
+    throw new Error('INVALID_SESSION_OBJECT')
+  }
+
+  if (!Array.isArray(session.items)) {
+    throw new Error('INVALID_SESSION_ITEMS')
+  }
+
+  const items = session.items.map((item) => {
+    if (!item || typeof item !== 'object') {
+      changed = true
+      return {
+        id: '',
+        title: '',
+        speaker: '',
+        plannedDuration: 0,
+        type: 'other' as const,
+        ruleId: 'short',
+        disabled: true
+      }
+    }
+
+    const businessType = getMeetingItemBusinessType(item)
+    const nextBudgetLimitSeconds =
+      businessType === 'impromptu_block'
+        ? item.budgetLimitSeconds || item.plannedDuration || IMPROMPTU_BLOCK_DURATION_SECONDS
+        : item.budgetLimitSeconds
+
+    if (item.businessType !== businessType || item.budgetLimitSeconds !== nextBudgetLimitSeconds) {
+      changed = true
+      return {
+        ...item,
+        businessType,
+        budgetLimitSeconds: nextBudgetLimitSeconds
+      }
+    }
+
+    return item
+  })
+
+  return changed
+    ? {
+        ...session,
+        items
+      }
+    : session
+}
+
 // 按会议维度做串行同步，避免旧快照晚到覆盖新状态（例如 isCompleted 被回滚）。
 const pendingCloudSync = new Map<string, MeetingSession>()
 const cloudWorkers = new Map<string, Promise<void>>()
@@ -57,7 +114,9 @@ const cloudSyncState = new Map<string, SessionCloudSyncState>()
 const cloudSyncListeners = new Set<() => void>()
 
 const emitCloudSyncStateChange = () => {
-  cloudSyncListeners.forEach((listener) => listener())
+  cloudSyncListeners.forEach((listener) => {
+    listener()
+  })
 }
 
 const setCloudSyncState = (sessionId: string, state: SessionCloudSyncState) => {
@@ -150,7 +209,57 @@ export const StorageService = {
 
   getSessions(): MeetingSession[] {
     const sessions = Taro.getStorageSync(SESSIONS_KEY)
-    return sessions || []
+    if (!Array.isArray(sessions)) {
+      return []
+    }
+
+    const normalizedSessions = sessions
+      .map((session) => {
+        try {
+          return normalizeStoredSession(session as MeetingSession)
+        } catch (error) {
+          console.warn('[storage] skip invalid session cache', {error, session})
+          return null
+        }
+      })
+      .filter(Boolean) as MeetingSession[]
+
+    if (JSON.stringify(normalizedSessions) !== JSON.stringify(sessions)) {
+      Taro.setStorageSync(SESSIONS_KEY, normalizedSessions)
+    }
+
+    return normalizedSessions
+  },
+
+  getPreferredSession(): MeetingSession | null {
+    const sessions = this.getSessions()
+    if (sessions.length === 0) return null
+
+    const getSessionProgressScore = (session: MeetingSession): number => {
+      const completedItems = session.items.filter(
+        (item) => item.actualDuration !== undefined || item.actualEndTime
+      ).length
+      const totalActual = session.items.reduce((sum, item) => sum + (item.actualDuration || 0), 0)
+      const hasInProgressItem = session.items.some((item) => item.actualStartTime && !item.actualEndTime)
+      const completedBonus = session.isCompleted ? 1_000_000 : 0
+      const inProgressBonus = hasInProgressItem ? 500 : 0
+
+      return completedBonus + completedItems * 1000 + totalActual + inProgressBonus
+    }
+
+    return sessions.reduce(
+      (best, session) => {
+        if (!best) return session
+
+        const bestScore = getSessionProgressScore(best)
+        const nextScore = getSessionProgressScore(session)
+        if (nextScore === bestScore) {
+          return session.createdAt > best.createdAt ? session : best
+        }
+        return nextScore > bestScore ? session : best
+      },
+      null as MeetingSession | null
+    )
   },
 
   saveSession(session: MeetingSession, options?: {syncToCloud?: boolean}) {
@@ -195,10 +304,10 @@ export const StorageService = {
 
   getCloudSyncState(sessionId?: string): SessionCloudSyncState {
     if (!sessionId) {
-      return {status: 'idle', updatedAt: Date.now()}
+      return EMPTY_CLOUD_SYNC_STATE
     }
 
-    return cloudSyncState.get(sessionId) || {status: 'idle', updatedAt: 0}
+    return cloudSyncState.get(sessionId) || EMPTY_CLOUD_SYNC_STATE
   },
 
   subscribeCloudSyncState(listener: () => void): () => void {

@@ -1,10 +1,10 @@
 import Taro from '@tarojs/taro'
 import type {AgendaOpInput} from '../types/agendaV2'
-import {generateId} from '../utils/id'
+import {generateId, generateUuid, isUuid} from '../utils/id'
 
 const AGENDA_OPS_QUEUE_KEY = 'AACTP_AGENDA_OPS_QUEUE_V1'
 const MAX_BACKOFF_MS = 60_000
-const BASE_BACKOFF_MS = 1_000
+const BASE_BACKOFF_MS = 10_000
 
 export type PendingAgendaOpsBatch = {
   id: string
@@ -25,16 +25,40 @@ function safeLoadQueue(): PendingAgendaOpsBatch[] {
   const raw = Taro.getStorageSync(AGENDA_OPS_QUEUE_KEY)
   if (!raw || !Array.isArray(raw)) return []
 
-  return raw.filter((item): item is PendingAgendaOpsBatch => {
-    return (
-      item &&
-      typeof item.id === 'string' &&
-      typeof item.meetingId === 'string' &&
-      Array.isArray(item.ops) &&
-      typeof item.attempts === 'number' &&
-      typeof item.nextRetryAt === 'number'
-    )
-  })
+  let didSanitize = false
+
+  const queue = raw
+    .filter((item): item is PendingAgendaOpsBatch => {
+      return (
+        item &&
+        typeof item.id === 'string' &&
+        typeof item.meetingId === 'string' &&
+        Array.isArray(item.ops) &&
+        typeof item.attempts === 'number' &&
+        typeof item.nextRetryAt === 'number'
+      )
+    })
+    .map((item) => {
+      const sanitizedOps = item.ops.map((op) => {
+        if (isUuid(op.opId)) return op
+        didSanitize = true
+        return {
+          ...op,
+          opId: generateUuid()
+        }
+      })
+
+      return {
+        ...item,
+        ops: sanitizedOps
+      }
+    })
+
+  if (didSanitize) {
+    Taro.setStorageSync(AGENDA_OPS_QUEUE_KEY, queue)
+  }
+
+  return queue
 }
 
 function safeSaveQueue(queue: PendingAgendaOpsBatch[]) {
@@ -42,7 +66,7 @@ function safeSaveQueue(queue: PendingAgendaOpsBatch[]) {
 }
 
 function calcBackoff(attempts: number) {
-  const exp = Math.max(0, attempts)
+  const exp = Math.max(0, attempts - 1)
   return Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** exp)
 }
 
@@ -53,7 +77,10 @@ export const AgendaOpsSyncQueueService = {
     const batch: PendingAgendaOpsBatch = {
       id: generateId('agenda_batch'),
       meetingId,
-      ops,
+      ops: ops.map((op) => ({
+        ...op,
+        opId: isUuid(op.opId) ? op.opId : generateUuid()
+      })),
       attempts: 0,
       nextRetryAt: nowMs(),
       createdAt: nowMs(),
@@ -92,8 +119,8 @@ export const AgendaOpsSyncQueueService = {
     const nextAttempts = current.attempts + 1
     queue[idx] = {
       ...current,
-      attempts: nextAttempts,
       updatedAt: nowMs(),
+      attempts: nextAttempts,
       nextRetryAt: nowMs() + calcBackoff(nextAttempts),
       lastError: error
     }

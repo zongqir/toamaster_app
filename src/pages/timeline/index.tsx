@@ -1,9 +1,10 @@
 import {Button, Input, ScrollView, Text, View} from '@tarojs/components'
 import Taro from '@tarojs/taro'
 import {useCallback, useEffect, useRef, useState} from 'react'
-import MeetingStats from '../../components/MeetingStats'
-import PasswordModal from '../../components/PasswordModal'
 import {supabase} from '../../client/supabase'
+import CompletedMeetingReview from '../../components/CompletedMeetingReview'
+import OfficerQuickActions from '../../components/OfficerQuickActions'
+import PasswordModal from '../../components/PasswordModal'
 import {AgendaV2DatabaseService} from '../../db/agendaV2Database'
 import {DatabaseService} from '../../db/database'
 import {VotingDatabaseService} from '../../db/votingDatabase'
@@ -11,25 +12,35 @@ import {AgendaOpsSyncQueueService} from '../../services/agendaOpsSyncQueue'
 import {StorageService} from '../../services/storage'
 import {useMeetingStore} from '../../store/meetingStore'
 import type {AgendaOpInput} from '../../types/agendaV2'
-import type {MeetingItem} from '../../types/meeting'
+import type {MeetingItem, MeetingSession} from '../../types/meeting'
+import {isImpromptuBlock, isImpromptuSpeech} from '../../utils/agendaBusiness'
+import {validateAgendaItemDraft} from '../../utils/agendaItemValidation'
+import {buildStagedCreateAgendaOps, buildStagedReorderAgendaOps} from '../../utils/agendaOpBuilders'
 import {verifyPassword} from '../../utils/auth'
-import {generateId} from '../../utils/id'
+import {generateId, generateUuid} from '../../utils/id'
+import {safeRemoveRealtimeChannel} from '../../utils/realtime'
 import {safeNavigateTo, safeSwitchTab} from '../../utils/safeNavigation'
 
 export default function TimelinePage() {
   const {currentSession, setCurrentSession} = useMeetingStore()
   const [items, setItems] = useState<MeetingItem[]>([])
   const [metadata, setMetadata] = useState(currentSession?.metadata || {})
-  const [showStats, setShowStats] = useState(false)
   const [isCloudSession, setIsCloudSession] = useState(false)
   const [showPasswordModal, setShowPasswordModal] = useState(false)
   const [isCompact, setIsCompact] = useState(false)
   const [showMeetingLinkDialog, setShowMeetingLinkDialog] = useState(false)
   const [meetingLinkInput, setMeetingLinkInput] = useState('')
   const [isEditingLink, setIsEditingLink] = useState(false)
+  const [showInsertDialog, setShowInsertDialog] = useState(false)
+  const [pendingInsertIndex, setPendingInsertIndex] = useState(0)
+  const [insertTitle, setInsertTitle] = useState('')
+  const [insertSpeaker, setInsertSpeaker] = useState('')
+  const [insertDuration, setInsertDuration] = useState('2')
   const [passwordAction, setPasswordAction] = useState<'reset' | 'addLink' | null>(null)
   const [agendaOpsSyncStatus, setAgendaOpsSyncStatus] = useState<'idle' | 'syncing' | 'failed'>('idle')
   const [agendaOpsSyncError, setAgendaOpsSyncError] = useState('')
+  const [availableSessions, setAvailableSessions] = useState<MeetingSession[]>([])
+  const [sessionPickerLoading, setSessionPickerLoading] = useState(false)
   const agendaOpsSyncQueueRef = useRef(Promise.resolve())
   const agendaOpsRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const realtimeSyncBusyRef = useRef(false)
@@ -46,22 +57,6 @@ export default function TimelinePage() {
     if (updates.parentTitle !== undefined) patch.parentTitle = updates.parentTitle
     if (updates.disabled !== undefined) patch.disabled = updates.disabled
     return patch
-  }, [])
-
-  const buildOrderOps = useCallback((nextItems: MeetingItem[], includeItemIds?: Set<string>): AgendaOpInput[] => {
-    return nextItems
-      .map((item, index) => ({item, index}))
-      .filter(({item}) => (includeItemIds ? includeItemIds.has(item.id) : true))
-      .map(({item, index}) => ({
-        opId: generateId('op'),
-        type: 'move_item' as const,
-        itemKey: item.id,
-        payload: {
-          parentItemKey: null,
-          orderIndex: index,
-          depth: 1
-        }
-      }))
   }, [])
 
   const isAgendaVersionConflict = useCallback((errorText?: string, code?: string) => {
@@ -113,6 +108,12 @@ export default function TimelinePage() {
 
             const bootstrapResult = await AgendaV2DatabaseService.bootstrapAgendaFromSession(latest)
             if (!bootstrapResult.success) {
+              console.error('[timeline] bootstrapAgendaFromSession failed', {
+                meetingId,
+                batch,
+                sessionAgendaVersion: latest.agendaVersion,
+                result: bootstrapResult
+              })
               AgendaOpsSyncQueueService.markRetry(batch.id, bootstrapResult.error || '初始化失败')
               setAgendaOpsSyncStatus('failed')
               setAgendaOpsSyncError(bootstrapResult.error || '初始化失败')
@@ -166,6 +167,13 @@ export default function TimelinePage() {
 
             if (!applyResult.success) {
               const detail = applyResult.data
+              console.error('[timeline] applyAgendaOps failed', {
+                meetingId,
+                batch,
+                baseAgendaVersion,
+                detail,
+                error: applyResult.error
+              })
               const isVersionConflict = isAgendaVersionConflict(applyResult.error, detail?.code)
               if (isVersionConflict) {
                 setAgendaOpsSyncStatus('failed')
@@ -206,7 +214,10 @@ export default function TimelinePage() {
           }
         })
         .catch((error) => {
-          console.warn('Timeline Agenda V2 queue failed:', error)
+          console.error('[timeline] Agenda V2 queue failed', {
+            meetingId,
+            error
+          })
           setAgendaOpsSyncStatus('failed')
           setAgendaOpsSyncError(error instanceof Error ? error.message : '同步队列异常')
         })
@@ -250,7 +261,7 @@ export default function TimelinePage() {
       deferredPatchRef.current.delete(itemId)
       await syncAgendaOpsToCloud([
         {
-          opId: generateId('op'),
+          opId: generateUuid(),
           type: 'update_item',
           itemKey: itemId,
           payload: {patch}
@@ -310,7 +321,7 @@ export default function TimelinePage() {
         }
       }
     },
-    [currentSession, items, metadata, setCurrentSession, syncAgendaOpsToCloud]
+    [currentSession, metadata, setCurrentSession, syncAgendaOpsToCloud]
   )
 
   useEffect(() => {
@@ -349,10 +360,6 @@ export default function TimelinePage() {
     if (currentSession) {
       setItems(currentSession.items)
       setMetadata(currentSession.metadata)
-      // 如果会议已完成，默认显示统计视图
-      if (currentSession.isCompleted) {
-        setShowStats(true)
-      }
       // 加载会议链接（从数据库）
       if (isCloudSession) {
         loadMeetingLink()
@@ -395,31 +402,35 @@ export default function TimelinePage() {
           })()
         }
       )
-      .on('postgres_changes', {event: 'UPDATE', schema: 'public', table: 'meetings', filter: `id=eq.${meetingId}`}, () => {
-        void (async () => {
-          if (realtimeSyncBusyRef.current) return
-          if (AgendaOpsSyncQueueService.hasPending(meetingId)) return
+      .on(
+        'postgres_changes',
+        {event: 'UPDATE', schema: 'public', table: 'meetings', filter: `id=eq.${meetingId}`},
+        () => {
+          void (async () => {
+            if (realtimeSyncBusyRef.current) return
+            if (AgendaOpsSyncQueueService.hasPending(meetingId)) return
 
-          realtimeSyncBusyRef.current = true
-          try {
-            const cloudSession = await DatabaseService.getMeeting(meetingId)
-            const latestLocal = useMeetingStore.getState().currentSession
-            if (!cloudSession || !latestLocal || latestLocal.id !== meetingId) return
-            if ((cloudSession.agendaVersion || 0) <= (latestLocal.agendaVersion || 0)) return
+            realtimeSyncBusyRef.current = true
+            try {
+              const cloudSession = await DatabaseService.getMeeting(meetingId)
+              const latestLocal = useMeetingStore.getState().currentSession
+              if (!cloudSession || !latestLocal || latestLocal.id !== meetingId) return
+              if ((cloudSession.agendaVersion || 0) <= (latestLocal.agendaVersion || 0)) return
 
-            setCurrentSession(cloudSession)
-            setItems(cloudSession.items)
-            setMetadata(cloudSession.metadata)
-            StorageService.saveSession(cloudSession, {syncToCloud: false})
-          } finally {
-            realtimeSyncBusyRef.current = false
-          }
-        })()
-      })
+              setCurrentSession(cloudSession)
+              setItems(cloudSession.items)
+              setMetadata(cloudSession.metadata)
+              StorageService.saveSession(cloudSession, {syncToCloud: false})
+            } finally {
+              realtimeSyncBusyRef.current = false
+            }
+          })()
+        }
+      )
       .subscribe()
 
     return () => {
-      void supabase.removeChannel(channel)
+      void safeRemoveRealtimeChannel(channel)
     }
   }, [currentSession?.id, setCurrentSession])
 
@@ -429,7 +440,9 @@ export default function TimelinePage() {
         clearTimeout(agendaOpsRetryTimerRef.current)
         agendaOpsRetryTimerRef.current = null
       }
-      deferredTimerRef.current.forEach((timer) => clearTimeout(timer))
+      deferredTimerRef.current.forEach((timer) => {
+        clearTimeout(timer)
+      })
       deferredTimerRef.current.clear()
       deferredPatchRef.current.clear()
     }
@@ -438,12 +451,31 @@ export default function TimelinePage() {
   useEffect(() => {
     if (currentSession) return
 
-    // 给 Zustand 状态同步留一个缓冲窗口，避免页面切换瞬间白屏闪烁
-    const timer = setTimeout(() => {
-      void safeSwitchTab('/pages/history/index')
-    }, 600)
+    let active = true
+    setSessionPickerLoading(true)
+    void (async () => {
+      const localSessions = StorageService.getSessions()
+      const cloudSessions = await DatabaseService.getAllMeetings()
+      if (!active) return
 
-    return () => clearTimeout(timer)
+      const mergedMap = new Map<string, MeetingSession>()
+      for (const session of cloudSessions) {
+        mergedMap.set(session.id, session)
+      }
+      for (const session of localSessions) {
+        const existing = mergedMap.get(session.id)
+        if (!existing || session.createdAt > existing.createdAt) {
+          mergedMap.set(session.id, session)
+        }
+      }
+
+      setAvailableSessions(Array.from(mergedMap.values()).sort((a, b) => b.createdAt - a.createdAt))
+      setSessionPickerLoading(false)
+    })()
+
+    return () => {
+      active = false
+    }
   }, [currentSession])
 
   const handleSaveAndStart = async () => {
@@ -466,71 +498,44 @@ export default function TimelinePage() {
     void safeNavigateTo('/pages/timer/index')
   }
 
-  const handleExportAgenda = () => {
-    if (!currentSession) return
-
-    // 生成格式化的 Agenda 文本
-    let text = '━━━━━━━━━━━━━━━━━━━━\n'
-    text += '📋 会议 Agenda 日程\n'
-    text += '━━━━━━━━━━━━━━━━━━━━\n\n'
-
-    // 会议基本信息
-    if (metadata.clubName) text += `🏛️  俱乐部：${metadata.clubName}\n`
-    if (metadata.meetingNo) text += `🔢 会议次数：第 ${metadata.meetingNo} 次\n`
-    if (metadata.theme) text += `📌 主题：${metadata.theme}\n`
-    if (metadata.date) text += `📅 日期：${metadata.date}\n`
-    if (metadata.timeRange) text += `⏰ 时间：${metadata.timeRange}\n`
-    else if (metadata.startTime) text += `⏰ 开始时间：${metadata.startTime}\n`
-    if (metadata.location) text += `📍 地点：${metadata.location}\n`
-    if (metadata.wordOfTheDay) text += `💬 每日一词：${metadata.wordOfTheDay}\n`
-    text += '\n'
-
-    // 环节列表
-    text += '━━━━━━━━━━━━━━━━━━━━\n'
-    text += '📝 会议流程\n'
-    text += '━━━━━━━━━━━━━━━━━━━━\n\n'
-
-    items.forEach((item, index) => {
-      if (item.disabled) return
-      const minutes = Math.floor(item.plannedDuration / 60)
-      const seconds = item.plannedDuration % 60
-      const timeStr = seconds > 0 ? `${minutes}分${seconds}秒` : `${minutes}分钟`
-
-      text += `${index + 1}. ${item.title}\n`
-      if (item.parentTitle) text += `   📂 所属：${item.parentTitle}\n`
-      text += `   👤 负责人：${item.speaker}\n`
-      text += `   ⏱️  时长：${timeStr}\n`
-      if (item.startTime) text += `   🕐 开始：${item.startTime}\n`
-      text += '\n'
-    })
-
-    // 统计信息
-    const totalDuration = items.reduce((sum, item) => (item.disabled ? sum : sum + item.plannedDuration), 0)
-    const totalMinutes = Math.floor(totalDuration / 60)
-    text += '━━━━━━━━━━━━━━━━━━━━\n'
-    text += `📊 总计：${items.filter((i) => !i.disabled).length} 个环节，预计 ${totalMinutes} 分钟\n`
-    text += '━━━━━━━━━━━━━━━━━━━━\n\n'
-    text += '© 启航AACTP 时间官'
-
-    // 复制到剪贴板
-    Taro.setClipboardData({
-      data: text,
-      success: () => {
-        Taro.showToast({
-          title: 'Agenda 已复制到剪贴板',
-          icon: 'success',
-          duration: 2000
-        })
-      }
-    })
-  }
-
   const handleCreateVoting = () => {
     if (!currentSession) return
 
     // 跳转到投票编辑页面
     void safeNavigateTo('/pages/vote-edit/index')
   }
+
+  const handleUpdateWordOfDay = useCallback(
+    (nextWordOfDay: string) => {
+      const latest = useMeetingStore.getState().currentSession || currentSession
+      if (!latest) return
+
+      const normalizedWord = nextWordOfDay.trim()
+      const nextMetadata = {
+        ...latest.metadata,
+        wordOfTheDay: normalizedWord || undefined
+      }
+      const nextSession = {
+        ...latest,
+        metadata: nextMetadata
+      }
+
+      setMetadata(nextMetadata)
+      setCurrentSession(nextSession)
+      StorageService.saveSession(nextSession, {syncToCloud: false})
+
+      if (isCloudSession) {
+        void DatabaseService.updateMeetingMetadata(latest.id, nextMetadata, {
+          isCompleted: Boolean(latest.isCompleted)
+        }).then((result) => {
+          if (!result.success) {
+            Taro.showToast({title: result.error || '每日一词同步失败', icon: 'none'})
+          }
+        })
+      }
+    },
+    [currentSession, isCloudSession, setCurrentSession]
+  )
 
   const handleResetMeeting = () => {
     if (!currentSession) return
@@ -678,15 +683,23 @@ export default function TimelinePage() {
     const resetSession = {
       ...currentSession,
       items: resetItems,
+      impromptuRecords: [],
       metadata: resetMetadata,
       isCompleted: false
     }
     setCurrentSession(resetSession)
     StorageService.saveSession(resetSession, {syncToCloud: false})
 
+    if (isCloudSession && currentSession.id) {
+      const clearImpromptuResult = await AgendaV2DatabaseService.clearImpromptuSpeechRecords(currentSession.id)
+      if (!clearImpromptuResult.success) {
+        console.error('清空即兴记录失败:', clearImpromptuResult.error)
+      }
+    }
+
     // 6. 同步重置后的计时字段到 Agenda V2
     const checkpointResetOps: AgendaOpInput[] = resetItems.map((item) => ({
-      opId: generateId('op'),
+      opId: generateUuid(),
       type: 'timer_checkpoint',
       itemKey: item.id,
       payload: {
@@ -712,13 +725,26 @@ export default function TimelinePage() {
       }
     }
 
-    setShowStats(false)
     Taro.showToast({title: '已重置会议', icon: 'success'})
   }
 
   const updateItem = (id: string, updates: Partial<MeetingItem>, options?: {deferred?: boolean}) => {
-    const patch = mapItemUpdatesToPatch(updates)
-    commitItemsMutation((prev) => prev.map((item) => (item.id === id ? {...item, ...updates} : item)))
+    const normalizedUpdates = {...updates}
+
+    if (typeof normalizedUpdates.title === 'string') {
+      const trimmedTitle = normalizedUpdates.title.trim()
+      if (!trimmedTitle) return
+      normalizedUpdates.title = trimmedTitle
+    }
+
+    if (typeof normalizedUpdates.speaker === 'string') {
+      const trimmedSpeaker = normalizedUpdates.speaker.trim()
+      if (!trimmedSpeaker) return
+      normalizedUpdates.speaker = trimmedSpeaker
+    }
+
+    const patch = mapItemUpdatesToPatch(normalizedUpdates)
+    commitItemsMutation((prev) => prev.map((item) => (item.id === id ? {...item, ...normalizedUpdates} : item)))
 
     if (Object.keys(patch).length === 0) return
 
@@ -729,12 +755,20 @@ export default function TimelinePage() {
 
     void syncAgendaOpsToCloud([
       {
-        opId: generateId('op'),
+        opId: generateUuid(),
         type: 'update_item',
         itemKey: id,
         payload: {patch}
       }
     ])
+  }
+
+  const openInsertDialog = (index: number) => {
+    setPendingInsertIndex(index)
+    setInsertTitle('')
+    setInsertSpeaker('')
+    setInsertDuration('2')
+    setShowInsertDialog(true)
   }
 
   const removeItem = (id: string) => {
@@ -746,23 +780,43 @@ export default function TimelinePage() {
     deferredPatchRef.current.delete(id)
 
     let removedIndex = -1
+    let removedIds = new Set<string>()
     commitItemsMutation(
       (prev) => {
         removedIndex = prev.findIndex((item) => item.id === id)
-        return prev.filter((item) => item.id !== id)
+        const target = prev.find((item) => item.id === id) || null
+        const nextRemovedIds = new Set<string>([id])
+
+        if (target && isImpromptuBlock(target)) {
+          prev
+            .filter((item) => isImpromptuSpeech(item) && item.agendaParentItemId === target.id)
+            .forEach((item) => {
+              nextRemovedIds.add(item.id)
+            })
+        }
+
+        if (target && isImpromptuSpeech(target) && target.agendaParentItemId) {
+          const siblingCount = prev.filter(
+            (item) => isImpromptuSpeech(item) && item.agendaParentItemId === target.agendaParentItemId
+          ).length
+          if (siblingCount <= 1) {
+            nextRemovedIds.add(target.agendaParentItemId)
+          }
+        }
+
+        removedIds = nextRemovedIds
+        return prev.filter((item) => !nextRemovedIds.has(item.id))
       },
-      (_prev, next) => {
+      (prev, next) => {
         if (removedIndex < 0) return []
         const shiftedIds = new Set(next.filter((_, idx) => idx >= removedIndex).map((item) => item.id))
-        return [
-          {
-            opId: generateId('op'),
-            type: 'delete_item' as const,
-            itemKey: id,
-            payload: {}
-          },
-          ...buildOrderOps(next, shiftedIds)
-        ]
+        const deleteOps = Array.from(removedIds).map((itemId) => ({
+          opId: generateUuid(),
+          type: 'delete_item' as const,
+          itemKey: itemId,
+          payload: {}
+        }))
+        return [...deleteOps, ...buildStagedReorderAgendaOps(prev, next, shiftedIds)]
       }
     )
   }
@@ -770,84 +824,51 @@ export default function TimelinePage() {
   // 上移环节
   const moveItemUp = (index: number) => {
     if (index === 0) return
-    const moving = items[index]
-    const upper = items[index - 1]
-    if (!moving || !upper) return
+    if (!items[index] || !items[index - 1]) return
 
-    const tempOrder = 1000000000 + index
     commitItemsMutation(
       (prev) => {
         const newItems = [...prev]
         ;[newItems[index - 1], newItems[index]] = [newItems[index], newItems[index - 1]]
         return newItems
       },
-      () => [
-        {
-          opId: generateId('op'),
-          type: 'move_item',
-          itemKey: moving.id,
-          payload: {parentItemKey: null, orderIndex: tempOrder, depth: 1}
-        },
-        {
-          opId: generateId('op'),
-          type: 'move_item',
-          itemKey: upper.id,
-          payload: {parentItemKey: null, orderIndex: index, depth: 1}
-        },
-        {
-          opId: generateId('op'),
-          type: 'move_item',
-          itemKey: moving.id,
-          payload: {parentItemKey: null, orderIndex: index - 1, depth: 1}
-        }
-      ]
+      (prev, next) => buildStagedReorderAgendaOps(prev, next)
     )
   }
 
   // 下移环节
   const moveItemDown = (index: number) => {
     if (index === items.length - 1) return
-    const moving = items[index]
-    const lower = items[index + 1]
-    if (!moving || !lower) return
+    if (!items[index] || !items[index + 1]) return
 
-    const tempOrder = 1000000000 + index
     commitItemsMutation(
       (prev) => {
         const newItems = [...prev]
         ;[newItems[index], newItems[index + 1]] = [newItems[index + 1], newItems[index]]
         return newItems
       },
-      () => [
-        {
-          opId: generateId('op'),
-          type: 'move_item',
-          itemKey: moving.id,
-          payload: {parentItemKey: null, orderIndex: tempOrder, depth: 1}
-        },
-        {
-          opId: generateId('op'),
-          type: 'move_item',
-          itemKey: lower.id,
-          payload: {parentItemKey: null, orderIndex: index, depth: 1}
-        },
-        {
-          opId: generateId('op'),
-          type: 'move_item',
-          itemKey: moving.id,
-          payload: {parentItemKey: null, orderIndex: index + 1, depth: 1}
-        }
-      ]
+      (prev, next) => buildStagedReorderAgendaOps(prev, next)
     )
   }
 
   // 在指定位置插入新环节
   const insertItemAt = (index: number) => {
+    const validation = validateAgendaItemDraft({
+      title: insertTitle,
+      speaker: insertSpeaker,
+      durationText: insertDuration
+    })
+
+    if (validation.errorMessage || !validation.durationMinutes) {
+      Taro.showToast({title: validation.errorMessage || '请填写正确的环节信息', icon: 'none'})
+      return
+    }
+
     const newItem: MeetingItem = {
       id: generateId('item'),
-      title: '新环节',
-      speaker: '',
-      plannedDuration: 120,
+      title: validation.title,
+      speaker: validation.speaker,
+      plannedDuration: validation.durationMinutes * 60,
       type: 'other',
       ruleId: 'short'
     }
@@ -858,45 +879,15 @@ export default function TimelinePage() {
         newItems.splice(index, 0, newItem)
         return newItems
       },
-      (_prev, next) => {
-        const insertedIndex = next.findIndex((item) => item.id === newItem.id)
-        const shiftOps = next
-          .map((item, idx) => ({item, idx}))
-          .filter(({item, idx}) => item.id !== newItem.id && idx >= insertedIndex)
-          .sort((a, b) => b.idx - a.idx)
-          .map(({item, idx}) => ({
-            opId: generateId('op'),
-            type: 'move_item' as const,
-            itemKey: item.id,
-            payload: {parentItemKey: null, orderIndex: idx, depth: 1}
-          }))
-
-        const createOp: AgendaOpInput = {
-          opId: generateId('op'),
-          type: 'create_item',
-          itemKey: newItem.id,
-          payload: {
-            item: {
-              itemKey: newItem.id,
-              title: newItem.title,
-              speaker: newItem.speaker || null,
-              plannedDuration: newItem.plannedDuration,
-              orderIndex: Math.max(insertedIndex, 0),
-              itemType: newItem.type,
-              ruleId: newItem.ruleId,
-              nodeKind: 'leaf',
-              budgetMode: 'independent',
-              consumeParentBudget: true,
-              statusCode: 'initial',
-              statusColor: 'blue',
-              statusRuleProfile: newItem.plannedDuration > 300 ? 'gt5m' : 'lte5m'
-            }
-          }
-        }
-        return [...shiftOps, createOp]
+      (prev, next) => {
+        return [...buildStagedCreateAgendaOps(prev, next, [newItem]), ...buildStagedReorderAgendaOps(prev, next)]
       }
     )
 
+    setShowInsertDialog(false)
+    setInsertTitle('')
+    setInsertSpeaker('')
+    setInsertDuration('2')
     Taro.showToast({title: '已添加环节', icon: 'success'})
   }
 
@@ -908,8 +899,50 @@ export default function TimelinePage() {
 
   if (!currentSession) {
     return (
-      <View className="h-screen bg-gradient-page flex items-center justify-center">
-        <Text className="text-sm text-white/80">正在加载会议...</Text>
+      <View className="h-screen bg-gradient-page flex flex-col">
+        <View className="px-4 pt-8 pb-4 border-b border-border/60 bg-background/90">
+          <Text className="text-[22px] font-black text-foreground block">选择会议</Text>
+          <Text className="text-sm text-muted-foreground block mt-1">
+            先选择一场会议，再进入流程预览和三官快捷记录。
+          </Text>
+        </View>
+        <ScrollView className="flex-1" scrollY>
+          <View className="px-4 py-4 space-y-3">
+            {sessionPickerLoading ? (
+              <View className="ui-card p-4 flex items-center justify-center">
+                <Text className="text-sm text-muted-foreground">会议列表加载中...</Text>
+              </View>
+            ) : availableSessions.length > 0 ? (
+              availableSessions.map((session) => (
+                <View
+                  key={session.id}
+                  className="ui-card p-4 active:opacity-80"
+                  onClick={() => {
+                    setCurrentSession(session)
+                    StorageService.saveSession(session, {syncToCloud: false})
+                  }}>
+                  <Text className="text-base font-bold text-foreground block truncate">
+                    {session.metadata.theme || '未命名会议'}
+                  </Text>
+                  <Text className="text-xs text-muted-foreground block mt-1">
+                    {session.metadata.meetingNo ? `第 ${session.metadata.meetingNo} 次` : '未设置会议次数'} ·{' '}
+                    {session.items.length} 个环节
+                  </Text>
+                </View>
+              ))
+            ) : (
+              <View className="ui-card p-5">
+                <Text className="text-base font-semibold text-foreground block">暂无可选会议</Text>
+                <Text className="text-sm text-muted-foreground block mt-1">返回会议列表新建或选择一场会议。</Text>
+                <Button
+                  className="ui-btn-primary h-11 text-sm font-bold mt-4"
+                  onClick={() => void safeSwitchTab('/pages/history/index')}>
+                  返回会议列表
+                </Button>
+              </View>
+            )}
+          </View>
+        </ScrollView>
       </View>
     )
   }
@@ -919,14 +952,8 @@ export default function TimelinePage() {
     agendaOpsSyncStatus === 'syncing'
       ? '议程增量同步中...'
       : agendaOpsSyncStatus === 'failed'
-      ? `议程增量同步失败${agendaOpsSyncError ? `：${agendaOpsSyncError}` : ''}`
-      : '议程已增量保存'
-
-  console.log('Timeline Debug:', {
-    hasSession: !!currentSession,
-    isCompleted,
-    itemsCount: items.length
-  })
+        ? `议程增量同步失败${agendaOpsSyncError ? `：${agendaOpsSyncError}` : ''}`
+        : '议程已增量保存'
 
   return (
     <View className="h-screen bg-gradient-page flex flex-col">
@@ -937,197 +964,125 @@ export default function TimelinePage() {
           </Text>
           <View className="flex flex-wrap gap-2 justify-end">
             {!isCompleted && (
-              <>
-                <View
-                  className="ui-btn-secondary h-10 px-3 rounded-lg flex items-center gap-1.5"
-                  onClick={handleExportAgenda}>
-                  <View className="i-mdi-export text-base text-foreground" />
-                  <Text className="text-xs font-semibold text-foreground">导出</Text>
-                </View>
-                <View
-                  className="ui-btn-secondary h-10 px-3 rounded-lg flex items-center gap-1.5"
-                  onClick={handleCreateVoting}>
-                  <View className="i-mdi-vote text-base text-foreground" />
-                  <Text className="text-xs font-semibold text-foreground">投票</Text>
-                </View>
-              </>
+              <View
+                className="ui-btn-secondary h-10 px-3 rounded-lg flex items-center gap-1.5"
+                onClick={handleCreateVoting}>
+                <View className="i-mdi-vote text-base text-foreground" />
+                <Text className="text-xs font-semibold text-foreground">投票</Text>
+              </View>
+            )}
+            {isCloudSession && (
+              <View
+                className="ui-btn-secondary h-10 px-3 rounded-lg flex items-center gap-1.5"
+                onClick={handleOpenMeetingLink}>
+                <View className="i-mdi-link-variant text-base text-foreground" />
+                <Text className="text-xs font-semibold text-foreground">链接</Text>
+              </View>
             )}
             <View
               className="ui-btn-secondary h-10 px-3 rounded-lg flex items-center gap-1.5"
-              onClick={() => Taro.navigateBack()}>
+              onClick={() => void safeSwitchTab('/pages/history/index')}>
               <View className="i-mdi-undo text-base text-foreground" />
               <Text className="text-xs font-semibold text-foreground">返回</Text>
             </View>
             {isCompleted && (
-              <>
-                <View
-                  className="h-10 px-3 rounded-lg flex items-center gap-1.5 border border-amber-500/55 bg-amber-500/10 active:bg-amber-500/15"
-                  onClick={handleResetMeeting}>
-                  <View className="i-mdi-refresh text-base text-amber-400" />
-                  <Text className="text-xs font-semibold text-amber-300">重置</Text>
-                </View>
-                <View
-                  className={`h-10 px-3 rounded-lg flex items-center gap-1.5 border ${
-                    showStats
-                      ? 'bg-primary border-primary/60 active:bg-primary/85'
-                      : 'bg-secondary/70 border-border/70 active:bg-secondary/85'
-                  }`}
-                  onClick={() => setShowStats(!showStats)}>
-                  <View
-                    className={`i-mdi-${showStats ? 'format-list-bulleted' : 'chart-bar'} text-base ${
-                      showStats ? 'text-white' : 'text-foreground'
-                    }`}
-                  />
-                  <Text className={`text-xs font-semibold ${showStats ? 'text-white' : 'text-foreground'}`}>
-                    {showStats ? '列表' : '统计'}
-                  </Text>
-                </View>
-                <View
-                  className="h-10 px-3 rounded-lg flex items-center gap-1.5 border border-primary/60 bg-primary active:bg-primary/85"
-                  onClick={() => {
-                    const summary = items
-                      .filter((i) => !i.disabled)
-                      .map(
-                        (i) =>
-                          `${i.title} (${i.speaker || 'N/A'}): 计划 ${formatDuration(
-                            i.plannedDuration
-                          )}, 实际 ${formatDuration(i.actualDuration || 0)}`
-                      )
-                      .join('\n')
-                    Taro.setClipboardData({data: summary})
-                  }}>
-                  <View className="i-mdi-content-copy text-base text-white" />
-                  <Text className="text-xs font-semibold text-white">复制</Text>
-                </View>
-              </>
+              <View
+                className="h-10 px-3 rounded-lg flex items-center gap-1.5 border border-amber-500/55 bg-amber-500/10 active:bg-amber-500/15"
+                onClick={handleResetMeeting}>
+                <View className="i-mdi-refresh text-base text-amber-400" />
+                <Text className="text-xs font-semibold text-amber-300">重置</Text>
+              </View>
             )}
           </View>
         </View>
-        <Text
-          className={`mb-2 block truncate text-xs ${
-            agendaOpsSyncStatus === 'failed'
-              ? 'text-red-300'
-              : agendaOpsSyncStatus === 'syncing'
-              ? 'text-amber-300'
-              : 'text-emerald-300'
-          }`}>
-          {agendaSyncText}
-        </Text>
+        {!isCompleted && (
+          <Text
+            className={`mb-2 block truncate text-xs ${
+              agendaOpsSyncStatus === 'failed'
+                ? 'text-red-300'
+                : agendaOpsSyncStatus === 'syncing'
+                  ? 'text-amber-300'
+                  : 'text-emerald-300'
+            }`}>
+            {agendaSyncText}
+          </Text>
+        )}
 
-        {!showStats && (
-          <>
-            <View className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-2'} gap-2`}>
-              <View className="ui-card p-2">
-                <Text className="text-xs text-muted-foreground block mb-0.5 uppercase tracking-wider">会议主题</Text>
-                <Input
-                  className="text-sm text-foreground w-full font-medium mt-1"
-                  value={metadata.theme}
-                  onInput={(e) => setMetadata({...metadata, theme: e.detail.value})}
-                  placeholder="请输入主题"
-                  adjustPosition={false}
-                />
-              </View>
-              <View className="ui-card p-2">
-                <Text className="text-xs text-muted-foreground block mb-0.5 uppercase tracking-wider">开始时间</Text>
-                <Input
-                  className="text-sm text-foreground w-full font-medium mt-1"
-                  value={metadata.startTime}
-                  onInput={(e) => setMetadata({...metadata, startTime: e.detail.value})}
-                  placeholder="19:30"
-                  adjustPosition={false}
-                />
-              </View>
+        {!isCompleted && (
+          <View className={`grid ${isCompact ? 'grid-cols-1' : 'grid-cols-2'} gap-2`}>
+            <View className="ui-card p-2">
+              <Text className="text-xs text-muted-foreground block mb-0.5 uppercase tracking-wider">会议主题</Text>
+              <Input
+                className="text-sm text-foreground w-full font-medium mt-1"
+                value={metadata.theme}
+                onInput={(e) => setMetadata({...metadata, theme: e.detail.value})}
+                placeholder="请输入主题"
+                adjustPosition={false}
+              />
             </View>
+            <View className="ui-card p-2">
+              <Text className="text-xs text-muted-foreground block mb-0.5 uppercase tracking-wider">开始时间</Text>
+              <Input
+                className="text-sm text-foreground w-full font-medium mt-1"
+                value={metadata.startTime}
+                onInput={(e) => setMetadata({...metadata, startTime: e.detail.value})}
+                placeholder="19:30"
+                adjustPosition={false}
+              />
+            </View>
+          </View>
+        )}
 
-            {/* 投票 ID 显示 */}
-            {metadata.votingId && (
-              <View className="mt-2 ui-card border-primary/30">
-                <View className="flex justify-between items-center flex-wrap gap-2">
-                  <View className="flex-1 min-w-0">
-                    <Text className="text-[10px] text-muted-foreground block mb-0.5 uppercase tracking-wider">
-                      投票ID
-                    </Text>
-                    <Text className="text-lg font-bold text-foreground tracking-widest break-all">
-                      {metadata.votingId}
-                    </Text>
-                  </View>
-                  <View className="flex gap-2 justify-end shrink-0">
-                    <View
-                      className="ui-top-action-btn w-11 h-11"
-                      onClick={() => {
-                        Taro.setClipboardData({
-                          data: metadata.votingId!,
-                          success: () => {
-                            Taro.showToast({title: 'ID已复制', icon: 'success'})
-                          }
-                        })
-                      }}>
-                      <View className="i-mdi-content-copy text-base text-foreground" />
-                    </View>
-                    <View
-                      className="ui-top-action-btn w-11 h-11 bg-primary border-primary/60 active:bg-primary/85"
-                      onClick={() => {
-                        void safeNavigateTo(`/pages/vote-result/index?id=${metadata.votingId}`)
-                      }}>
-                      <View className="i-mdi-chart-bar text-base text-white" />
-                    </View>
-                  </View>
+        {!isCompleted && metadata.votingId && (
+          <View className="mt-2 ui-card border-primary/30">
+            <View className="flex justify-between items-center flex-wrap gap-2">
+              <View className="flex-1 min-w-0">
+                <Text className="text-[10px] text-muted-foreground block mb-0.5 uppercase tracking-wider">投票ID</Text>
+                <Text className="text-lg font-bold text-foreground tracking-widest break-all">{metadata.votingId}</Text>
+              </View>
+              <View className="flex gap-2 justify-end shrink-0">
+                <View
+                  className="ui-top-action-btn w-11 h-11"
+                  onClick={() => {
+                    Taro.setClipboardData({
+                      data: metadata.votingId!,
+                      success: () => {
+                        Taro.showToast({title: 'ID已复制', icon: 'success'})
+                      }
+                    })
+                  }}>
+                  <View className="i-mdi-content-copy text-base text-foreground" />
+                </View>
+                <View
+                  className="ui-top-action-btn w-11 h-11 bg-primary border-primary/60 active:bg-primary/85"
+                  onClick={() => {
+                    void safeNavigateTo(`/pages/vote-result/index?id=${metadata.votingId}`)
+                  }}>
+                  <View className="i-mdi-chart-bar text-base text-white" />
                 </View>
               </View>
-            )}
-          </>
+            </View>
+          </View>
         )}
       </View>
 
-      {showStats && isCompleted ? (
-        <View className="flex-1">
-          <MeetingStats
-            items={items}
-            metadata={metadata}
-            meetingId={currentSession?.id}
-            onCreateVoting={handleCreateVoting}
-            topContent={
-              <View className="space-y-2">
-                <View className="ui-card p-3 border-primary/30">
-                  <Text className="text-sm font-medium text-foreground block text-center">
-                    📊 查看会议统计数据和超时分析
-                  </Text>
-                </View>
-
-                <View className="flex flex-wrap gap-2">
-                  <View
-                    className="flex-1 ui-btn-secondary h-11 p-3 rounded-lg flex items-center justify-center"
-                    onClick={handleOpenMeetingLink}>
-                    <View className="i-mdi-link-variant text-base text-primary mr-2" />
-                    <Text className="text-sm text-foreground">查看会议链接</Text>
-                  </View>
-                  {metadata.meetingLink && (
-                    <View
-                      className="ui-btn-primary h-11 px-4 rounded-lg flex items-center justify-center"
-                      onClick={handleCopyMeetingLink}>
-                      <View className="i-mdi-content-copy text-base text-white" />
-                    </View>
-                  )}
-                </View>
-
-                <View className="ui-muted-panel">
-                  <Text className="text-sm text-muted-foreground text-center">
-                    💡 提示：点击"查看会议链接"可{metadata.meetingLink ? '查看或编辑' : '添加'}
-                    会议链接，添加需要密码验证
-                  </Text>
-                </View>
-              </View>
-            }
-          />
-        </View>
+      {isCompleted ? (
+        <CompletedMeetingReview
+          session={currentSession}
+          metadata={metadata}
+          onOpenMeetingLink={handleOpenMeetingLink}
+          onOpenVoteResult={() => {
+            if (!metadata.votingId) return
+            void safeNavigateTo(`/pages/vote-result/index?id=${metadata.votingId}`)
+          }}
+        />
       ) : (
         <ScrollView className="flex-1 min-h-0 pt-3" scrollY enableBackToTop>
-          <View className={`space-y-3 pl-4 pr-6 ${isCompleted ? 'pb-6' : 'pb-3'} max-w-full overflow-x-hidden`}>
+          <View className="space-y-3 pl-4 pr-6 pb-3 max-w-full overflow-x-hidden">
             {items.map((item, index) => (
               <View key={item.id}>
-                {/* 在第一个环节前显示插入按钮 */}
                 {index === 0 && (
-                  <View className="flex items-center justify-center py-2 mb-2" onClick={() => insertItemAt(0)}>
+                  <View className="flex items-center justify-center py-2 mb-2" onClick={() => openInsertDialog(0)}>
                     <View className="ui-btn-secondary h-9 px-4 rounded-full flex items-center gap-1.5">
                       <View className="i-mdi-plus text-base text-foreground" />
                       <Text className="text-sm text-foreground font-semibold">在此处插入环节</Text>
@@ -1135,7 +1090,6 @@ export default function TimelinePage() {
                   </View>
                 )}
 
-                {/* 环节卡片 */}
                 <View
                   className={`ui-card-sharp p-4 ${item.disabled ? 'opacity-45 border-dashed' : 'border-l-2 border-l-primary/35'} flex flex-col relative`}>
                   <View className="flex justify-between items-start flex-wrap gap-2 mb-2">
@@ -1154,29 +1108,23 @@ export default function TimelinePage() {
                       />
                     </View>
                     <View className="flex items-center flex-wrap gap-1.5 justify-end">
-                      {/* 上移按钮 */}
                       <View
                         className={`ui-mini-icon-btn ${index === 0 ? 'opacity-40' : ''}`}
                         onClick={() => index > 0 && moveItemUp(index)}>
                         <View className="i-mdi-chevron-up text-base text-foreground/85" />
                       </View>
-                      {/* 下移按钮 */}
                       <View
                         className={`ui-mini-icon-btn ${index === items.length - 1 ? 'opacity-40' : ''}`}
                         onClick={() => index < items.length - 1 && moveItemDown(index)}>
                         <View className="i-mdi-chevron-down text-base text-foreground/85" />
                       </View>
-                      {/* 禁用/启用按钮 */}
-                      <View
-                        className="ui-mini-icon-btn"
-                        onClick={() => updateItem(item.id, {disabled: !item.disabled})}>
+                      <View className="ui-mini-icon-btn" onClick={() => updateItem(item.id, {disabled: !item.disabled})}>
                         {item.disabled ? (
                           <View className="i-mdi-eye-off text-base text-foreground/85" />
                         ) : (
                           <View className="i-mdi-eye text-base text-foreground/85" />
                         )}
                       </View>
-                      {/* 删除按钮 */}
                       <View
                         className="ui-mini-icon-btn bg-destructive/80 border-red-400/35 active:bg-destructive"
                         onClick={() => removeItem(item.id)}>
@@ -1221,8 +1169,7 @@ export default function TimelinePage() {
                   </View>
                 </View>
 
-                {/* 在每个环节后显示插入按钮 */}
-                <View className="flex items-center justify-center py-2" onClick={() => insertItemAt(index + 1)}>
+                <View className="flex items-center justify-center py-2" onClick={() => openInsertDialog(index + 1)}>
                   <View className="ui-btn-secondary h-9 px-4 rounded-full flex items-center gap-1.5">
                     <View className="i-mdi-plus text-base text-foreground" />
                     <Text className="text-sm text-foreground font-semibold">在此处插入环节</Text>
@@ -1236,13 +1183,69 @@ export default function TimelinePage() {
 
       {!isCompleted && (
         <View className="shrink-0 px-4 pt-3 pb-[max(env(safe-area-inset-bottom),12px)] bg-gradient-to-t from-background via-background/95 to-transparent border-t border-border/60">
-          {/* 开始计时按钮 */}
-          <Button
-            className="ui-btn-primary h-12 flex items-center justify-center font-bold shadow-xl w-full text-base break-keep"
-            onClick={handleSaveAndStart}>
-            <View className="i-mdi-play-circle text-2xl mr-2" />
-            开始计时
-          </Button>
+          <OfficerQuickActions
+            meetingId={currentSession.id}
+            items={items}
+            wordOfTheDay={metadata.wordOfTheDay}
+            onUpdateWordOfDay={handleUpdateWordOfDay}
+            onStartTimer={handleSaveAndStart}
+          />
+        </View>
+      )}
+
+      {showInsertDialog && (
+        <View
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+          onClick={() => setShowInsertDialog(false)}>
+          <View className="ui-card-strong ui-modal-panel rounded-2xl p-6 mx-4" onClick={(e) => e.stopPropagation()}>
+            <Text className="text-lg font-bold text-foreground block mb-4">新增环节</Text>
+            <Text className="text-xs text-muted-foreground block mb-4 leading-5">
+              环节名称、执行人和时间都必须填写后才能插入。
+            </Text>
+            <View className="space-y-3">
+              <View>
+                <Text className="text-xs text-muted-foreground block mb-1">环节名称</Text>
+                <Input
+                  className="ui-input rounded-lg px-3 py-2 text-sm w-full"
+                  value={insertTitle}
+                  onInput={(e) => setInsertTitle(e.detail.value)}
+                  placeholder="请输入环节名称"
+                  adjustPosition={false}
+                />
+              </View>
+              <View>
+                <Text className="text-xs text-muted-foreground block mb-1">执行人</Text>
+                <Input
+                  className="ui-input rounded-lg px-3 py-2 text-sm w-full"
+                  value={insertSpeaker}
+                  onInput={(e) => setInsertSpeaker(e.detail.value)}
+                  placeholder="请输入执行人"
+                  adjustPosition={false}
+                />
+              </View>
+              <View>
+                <Text className="text-xs text-muted-foreground block mb-1">时间（分钟）</Text>
+                <Input
+                  className="ui-input rounded-lg px-3 py-2 text-sm w-full"
+                  type="number"
+                  value={insertDuration}
+                  onInput={(e) => setInsertDuration(e.detail.value)}
+                  placeholder="请输入时间"
+                  adjustPosition={false}
+                />
+              </View>
+            </View>
+            <View className="flex flex-wrap gap-3 mt-6">
+              <Button className="flex-1 ui-btn-secondary h-10 text-sm" onClick={() => setShowInsertDialog(false)}>
+                取消
+              </Button>
+              <Button
+                className="flex-1 ui-btn-primary h-10 text-sm font-bold"
+                onClick={() => insertItemAt(pendingInsertIndex)}>
+                添加
+              </Button>
+            </View>
+          </View>
         </View>
       )}
 

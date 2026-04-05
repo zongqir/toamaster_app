@@ -1,0 +1,38 @@
+{
+    "sourceFile": ".gitignore",
+    "activeCommit": 0,
+    "commits": [
+        {
+            "activePatchIndex": 5,
+            "patches": [
+                {
+                    "date": 1774544036462,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n"
+                },
+                {
+                    "date": 1774544054158,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -40,5 +40,5 @@\n output/\r\n .sync\r\n history/*.json\r\n .vite_cache\r\n-dist-h5/js/index.92be6778.js\r\n+dist-h5/\n\\ No newline at end of file\n"
+                },
+                {
+                    "date": 1774614643363,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -40,5 +40,6 @@\n output/\r\n .sync\r\n history/*.json\r\n .vite_cache\r\n-dist-h5/\n\\ No newline at end of file\n+dist-h5/\r\n+dist-weapp/taro.js\r\n"
+                },
+                {
+                    "date": 1774614655747,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -0,0 +1,45 @@\n+dist/\r\n+deploy_versions/\r\n+.temp/\r\n+.rn_temp/\r\n+node_modules/\r\n+.swc\r\n+\r\n+# Logs\r\n+logs\r\n+*.log\r\n+npm-debug.log*\r\n+pnpm-debug.log*\r\n+yarn-debug.log*\r\n+yarn-error.log*\r\n+lerna-debug.log*\r\n+\r\n+# OS\r\n+.DS_Store\r\n+\r\n+# IDEs and editors\r\n+/.idea\r\n+.project\r\n+.classpath\r\n+.c9/\r\n+*.launch\r\n+.settings/\r\n+*.sublime-workspace\r\n+*.code-workspace\r\n+\r\n+# local env files\r\n+.env*.local\r\n+*.rest\r\n+*.http\r\n+\r\n+# 上传沙盒服务的zip\r\n+project.zip\r\n+taro-weapp-template.tar\r\n+\r\n+.vscode/\r\n+output/\r\n+.sync\r\n+history/*.json\r\n+.vite_cache\r\n+dist-h5/\r\n+dist-weapp/\r\n"
+                },
+                {
+                    "date": 1775271497126,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -42,49 +42,5 @@\n history/*.json\r\n .vite_cache\r\n dist-h5/\r\n dist-weapp/\r\n-dist/\r\n-deploy_versions/\r\n-.temp/\r\n-.rn_temp/\r\n-node_modules/\r\n-.swc\r\n-\r\n-# Logs\r\n-logs\r\n-*.log\r\n-npm-debug.log*\r\n-pnpm-debug.log*\r\n-yarn-debug.log*\r\n-yarn-error.log*\r\n-lerna-debug.log*\r\n-\r\n-# OS\r\n-.DS_Store\r\n-\r\n-# IDEs and editors\r\n-/.idea\r\n-.project\r\n-.classpath\r\n-.c9/\r\n-*.launch\r\n-.settings/\r\n-*.sublime-workspace\r\n-*.code-workspace\r\n-\r\n-# local env files\r\n-.env*.local\r\n-*.rest\r\n-*.http\r\n-\r\n-# 上传沙盒服务的zip\r\n-project.zip\r\n-taro-weapp-template.tar\r\n-\r\n-.vscode/\r\n-output/\r\n-.sync\r\n-history/*.json\r\n-.vite_cache\r\n-dist-h5/\r\n-dist-weapp/taro.js\r\n+.playwright-cli/page-2026-04-04T00-56-26-279Z.yml\r\n"
+                },
+                {
+                    "date": 1775271510988,
+                    "content": "Index: \n===================================================================\n--- \n+++ \n@@ -42,5 +42,5 @@\n history/*.json\r\n .vite_cache\r\n dist-h5/\r\n dist-weapp/\r\n-.playwright-cli/page-2026-04-04T00-56-26-279Z.yml\r\n+.playwright-cli/\r\n"
+                }
+            ],
+            "date": 1774544036462,
+            "name": "Commit-0",
+            "content": "dist/\r\ndeploy_versions/\r\n.temp/\r\n.rn_temp/\r\nnode_modules/\r\n.swc\r\n\r\n# Logs\r\nlogs\r\n*.log\r\nnpm-debug.log*\r\npnpm-debug.log*\r\nyarn-debug.log*\r\nyarn-error.log*\r\nlerna-debug.log*\r\n\r\n# OS\r\n.DS_Store\r\n\r\n# IDEs and editors\r\n/.idea\r\n.project\r\n.classpath\r\n.c9/\r\n*.launch\r\n.settings/\r\n*.sublime-workspace\r\n*.code-workspace\r\n\r\n# local env files\r\n.env*.local\r\n*.rest\r\n*.http\r\n\r\n# 上传沙盒服务的zip\r\nproject.zip\r\ntaro-weapp-template.tar\r\n\r\n.vscode/\r\noutput/\r\n.sync\r\nhistory/*.json\r\n.vite_cache\r\ndist-h5/js/index.92be6778.js\r\n"
+        }
+    ]
+}

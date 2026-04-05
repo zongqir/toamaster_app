@@ -30,7 +30,17 @@ Deno.serve(async (req) => {
 
     // 3. 调用硅基流动 Qwen2-VL OCR API
     const apiUrl = 'https://api.siliconflow.cn/v1/chat/completions'
-    const apiKey = Deno.env.get('SILICONFLOW_API_KEY') || 'sk-oksisvxuztrfhyitxuycftbcgkyathnkmtextetbnbmfkzns'
+    const apiKey = Deno.env.get('SILICONFLOW_API_KEY')
+
+    if (!apiKey) {
+      return new Response(
+        JSON.stringify({ error: '服务端未配置 SILICONFLOW_API_KEY' }),
+        {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        }
+      )
+    }
 
     console.log('[OCR Function] 调用硅基流动 API')
 

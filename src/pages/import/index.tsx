@@ -1,21 +1,125 @@
 import {Text, Textarea, View} from '@tarojs/components'
 import Taro from '@tarojs/taro'
-import {useRef, useState} from 'react'
+import {useEffect, useRef, useState} from 'react'
 import {AgendaV2DatabaseService} from '../../db/agendaV2Database'
 import {DatabaseService} from '../../db/database'
 import {StorageService} from '../../services/storage'
 import {useMeetingStore} from '../../store/meetingStore'
-import type {MeetingItemType, MeetingSession} from '../../types/meeting'
+import type {MeetingItemBusinessType, MeetingItemType, MeetingSession} from '../../types/meeting'
+import {IMPROMPTU_BLOCK_DURATION_SECONDS, IMPROMPTU_BLOCK_TITLE} from '../../utils/agendaBusiness'
 import {generateId} from '../../utils/id'
 import {safeRedirectTo} from '../../utils/safeNavigation'
+
+const supabaseUrl = process.env.TARO_APP_SUPABASE_URL
+const supabaseAnonKey = process.env.TARO_APP_SUPABASE_ANON_KEY
+const edgeFunctionTransportVersion = 'public-anon-v1-20260328'
+const parsePollIntervalMs = 2000
+const maxParseStatusFailures = 3
+
+type ParseFunctionResponse = {
+  error?: string
+  metadata?: {
+    clubName?: string
+    meetingNo?: string | number
+    theme?: string
+    date?: string
+    wordOfTheDay?: string
+    location?: string
+    timeRange?: string
+    startTime?: string
+    endTime?: string
+  }
+  items?: Array<{
+    title?: string
+    speaker?: string
+    durationSec?: number
+    duration?: number
+    startTime?: string
+    type?: MeetingItemType
+    parentTitle?: string
+  }>
+}
+
+type ParseJobResponse = {
+  jobId: string
+  status: 'queued' | 'processing' | 'succeeded' | 'failed'
+  result?: ParseFunctionResponse
+  errorMessage?: string
+}
+
+function isImpromptuHostRoleTitle(title: string | null | undefined) {
+  const normalized = title?.trim().toLowerCase() || ''
+  return normalized.includes('即兴主持') || normalized.includes('table topics master')
+}
+
+function isPlaceholderImpromptuHostName(name: string | null | undefined) {
+  const normalized = name?.trim().toLowerCase() || ''
+  return normalized === '即兴演讲官' || normalized === '即兴主持' || normalized === 'table topics master'
+}
+
+async function invokePublicEdgeFunction<T>(functionName: string, body: Record<string, unknown>): Promise<T> {
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new Error('缺少 Supabase 配置')
+  }
+
+  console.log('[import-edge]', {
+    version: edgeFunctionTransportVersion,
+    functionName,
+    usingAnonTransport: true,
+    url: `${supabaseUrl}/functions/v1/${functionName}`
+  })
+
+  const response = await Taro.request({
+    url: `${supabaseUrl}/functions/v1/${functionName}`,
+    method: 'POST',
+    timeout: 300000,
+    header: {
+      'Content-Type': 'application/json',
+      apikey: supabaseAnonKey,
+      Authorization: `Bearer ${supabaseAnonKey}`
+    },
+    data: body
+  })
+
+  const payload =
+    typeof response.data === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(response.data)
+          } catch {
+            return response.data
+          }
+        })()
+      : response.data
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const errorText = typeof payload === 'string' ? payload : JSON.stringify(payload)
+    throw new Error(errorText)
+  }
+
+  return payload as T
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 export default function ImportPage() {
   const [inputText, setInputText] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [_isOCRLoading, setIsOCRLoading] = useState(false)
+  const [parseStatusText, setParseStatusText] = useState('')
   const isNavigatingRef = useRef(false)
+  const isPageActiveRef = useRef(true)
   const {setCurrentSession} = useMeetingStore()
   const remainingChars = 5000 - inputText.length
+
+  useEffect(() => {
+    return () => {
+      isPageActiveRef.current = false
+      Taro.hideLoading()
+    }
+  }, [])
 
   const goToTimeline = async () => {
     if (isNavigatingRef.current) return
@@ -68,11 +172,7 @@ export default function ImportPage() {
       }
       const imageBase64 = `data:${mimeType};base64,${base64}`
 
-      // 调用硅基流动 Qwen2-VL OCR API
-      const apiUrl = 'https://api.siliconflow.cn/v1/chat/completions'
-      const apiKey = 'sk-oksisvxuztrfhyitxuycftbcgkyathnkmtextetbnbmfkzns'
-
-      console.log('调用 OCR API')
+      console.log('调用 OCR Edge Function')
       console.log('图片 base64 大小:', imageBase64.length, '字节')
 
       // 30秒后更新提示
@@ -84,58 +184,29 @@ export default function ImportPage() {
       }, 60000)
 
       const startTime = Date.now()
-      const response = await Taro.request({
-        url: apiUrl,
-        method: 'POST',
-        timeout: 300000,
-        header: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`
-        },
-        data: {
-          model: 'Qwen/Qwen2-VL-72B-Instruct',
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: imageBase64
-                  }
-                },
-                {
-                  type: 'text',
-                  text: '请识别图片中的所有文字内容，包括表格中的文字。直接输出识别到的文字，不要使用 HTML 标签，不要使用 Markdown 格式，只输出纯文本内容。'
-                }
-              ]
-            }
-          ],
-          max_tokens: 8000,
-          temperature: 0.0
-        }
-      })
       const endTime = Date.now()
+      const ocrResult = await invokePublicEdgeFunction<{text?: string; error?: string}>('ocr-recognition', {
+        imageBase64
+      })
 
-      console.log('OCR 响应状态:', response.statusCode)
+      console.log('OCR function result:', {
+        hasData: Boolean(ocrResult),
+        hasError: Boolean(ocrResult?.error)
+      })
       console.log('OCR 耗时:', (endTime - startTime) / 1000, '秒')
 
       Taro.hideLoading()
 
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        const aiResponse = response.data
-        if (aiResponse.choices && aiResponse.choices.length > 0) {
-          const ocrText = aiResponse.choices[0].message.content
-          setInputText(ocrText)
-          Taro.showToast({title: 'OCR 识别成功', icon: 'success'})
-        } else {
-          throw new Error('OCR 返回数据格式错误')
-        }
-      } else {
-        const errorText = typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
-        console.error('OCR 失败详情:', errorText)
-        throw new Error(`OCR 失败 (${response.statusCode}): ${errorText}`)
+      if (ocrResult?.error) {
+        throw new Error(ocrResult.error)
       }
+
+      if (!ocrResult?.text) {
+        throw new Error('OCR 返回数据格式错误')
+      }
+
+      setInputText(ocrResult.text)
+      Taro.showToast({title: 'OCR 识别成功', icon: 'success'})
     } catch (error) {
       console.error('OCR 错误:', error)
       Taro.hideLoading()
@@ -150,6 +221,147 @@ export default function ImportPage() {
     }
   }
 
+  const setLoadingStatus = (message: string) => {
+    setParseStatusText(message)
+    Taro.showLoading({title: message, mask: true})
+  }
+
+  const waitForParseResult = async (jobId: string): Promise<ParseFunctionResponse> => {
+    let failureCount = 0
+
+    while (isPageActiveRef.current) {
+      let job: ParseJobResponse
+
+      try {
+        job = await invokePublicEdgeFunction<ParseJobResponse>('get-parse-job', {jobId})
+        failureCount = 0
+      } catch (error) {
+        failureCount += 1
+        if (failureCount >= maxParseStatusFailures) {
+          throw error instanceof Error ? error : new Error('状态查询失败，请重试')
+        }
+
+        setLoadingStatus('状态同步中')
+        await sleep(parsePollIntervalMs)
+        continue
+      }
+
+      if (job.status === 'queued') {
+        setLoadingStatus('排队中...')
+        await sleep(parsePollIntervalMs)
+        continue
+      }
+
+      if (job.status === 'processing') {
+        setLoadingStatus('解析中...')
+        await sleep(parsePollIntervalMs)
+        continue
+      }
+
+      if (job.status === 'failed') {
+        throw new Error(job.errorMessage || '解析任务失败')
+      }
+
+      if (job.status === 'succeeded') {
+        if (!job.result) {
+          throw new Error('解析任务已完成，但结果为空')
+        }
+        return job.result
+      }
+
+      throw new Error('未知的解析任务状态')
+    }
+
+    throw new Error('页面已离开，停止等待解析结果')
+  }
+
+  const persistParsedMeeting = async (parsedData: ParseFunctionResponse) => {
+    if (parsedData?.error) {
+      throw new Error(parsedData.error)
+    }
+
+    const {metadata, items} = parsedData
+    if (!items || items.length === 0) {
+      throw new Error('未能识别出会议环节')
+    }
+
+    const processedItems = items.map((item) => {
+      const duration = item.durationSec || item.duration || 60
+      const normalizedTitle = (item.title || '').trim()
+      const isImpromptuBlock = normalizedTitle === IMPROMPTU_BLOCK_TITLE
+      const businessType: MeetingItemBusinessType = isImpromptuBlock ? 'impromptu_block' : 'normal'
+      return {
+        id: generateId('item'),
+        title: normalizedTitle || '未命名',
+        speaker: item.speaker || '主持人',
+        plannedDuration: duration,
+        startTime: item.startTime,
+        type: isImpromptuBlock ? 'other' : item.type || inferType(normalizedTitle),
+        ruleId: duration > 180 ? 'long' : 'short',
+        parentTitle: item.parentTitle || undefined,
+        businessType,
+        budgetLimitSeconds: isImpromptuBlock ? IMPROMPTU_BLOCK_DURATION_SECONDS : undefined
+      }
+    })
+    const normalizedItems = processedItems.reduce<typeof processedItems>((acc, item, index) => {
+      const nextItem = processedItems[index + 1]
+      const shouldMergeIntoFollowingImpromptu =
+        isImpromptuHostRoleTitle(item.title) &&
+        item.plannedDuration >= 10 * 60 &&
+        nextItem?.businessType === 'impromptu_block'
+
+      if (shouldMergeIntoFollowingImpromptu) {
+        if (isPlaceholderImpromptuHostName(nextItem.speaker) && item.speaker) {
+          nextItem.speaker = item.speaker
+        }
+        return acc
+      }
+
+      acc.push(item)
+      return acc
+    }, [])
+
+    const uniqueMeetingNo = await DatabaseService.generateUniqueMeetingNo(metadata?.meetingNo || null)
+
+    const newSession: MeetingSession = {
+      id: generateId('session'),
+      metadata: {
+        ...(metadata || {}),
+        meetingNo: uniqueMeetingNo
+      },
+      items: normalizedItems,
+      impromptuRecords: [],
+      createdAt: Date.now(),
+      isCompleted: false
+    }
+
+    setLoadingStatus('保存中...')
+    const saveResult = await DatabaseService.saveMeeting(newSession)
+    if (!saveResult.success) {
+      throw new Error(saveResult.error || '保存失败')
+    }
+
+    const bootstrapResult = await AgendaV2DatabaseService.bootstrapAgendaFromSession(newSession)
+    if (!bootstrapResult.success) {
+      console.warn('导入会议后初始化 Agenda V2 失败:', bootstrapResult.error)
+    }
+
+    const versionedSession: MeetingSession = {
+      ...newSession,
+      agendaVersion: bootstrapResult.data?.agendaVersion || newSession.agendaVersion || 1
+    }
+
+    StorageService.saveSession(versionedSession, {syncToCloud: false})
+    setCurrentSession(versionedSession)
+
+    Taro.hideLoading()
+    setParseStatusText('')
+    Taro.showToast({title: '会议已保存', icon: 'success', duration: 1500})
+    setTimeout(() => {
+      void goToTimeline()
+    }, 1500)
+  }
+
   const handleParse = async () => {
     console.log('=== handleParse called ===')
     console.log('input length:', inputText.length)
@@ -159,118 +371,25 @@ export default function ImportPage() {
       return
     }
 
-    const supabaseUrl = process.env.TARO_APP_SUPABASE_URL
-    if (!supabaseUrl) {
-      Taro.showToast({title: '缺少后端地址配置', icon: 'none'})
-      return
-    }
-
     setIsLoading(true)
-    Taro.showLoading({title: 'AI 解析中...', mask: false})
+    setLoadingStatus('提交中...')
 
     try {
-      // OCR flow remains unchanged; only parse flow is moved to backend function.
-      const response = await Taro.request({
-        url: `${supabaseUrl}/functions/v1/parse-meeting-table`,
-        method: 'POST',
-        timeout: 300000,
-        header: {
-          'Content-Type': 'application/json'
-        },
-        data: {
-          tableText: inputText
-        }
+      const submitResult = await invokePublicEdgeFunction<ParseJobResponse>('submit-parse-job', {
+        tableText: inputText
       })
 
-      console.log('parse response status:', response.statusCode)
-      console.log('parse response data:', response.data)
-
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        const errorText = typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
-        throw new Error(`解析失败 (${response.statusCode}): ${errorText}`)
-      }
-
-      const parsedData = response.data as {
-        error?: string
-        metadata?: Record<string, any>
-        items?: Array<{
-          title?: string
-          speaker?: string
-          durationSec?: number
-          duration?: number
-          startTime?: string
-          type?: MeetingItemType
-          parentTitle?: string
-        }>
-      }
-
-      if (parsedData?.error) {
-        throw new Error(parsedData.error)
-      }
-
-      const {metadata, items} = parsedData
-
-      if (!items || items.length === 0) {
-        Taro.showToast({title: '未能识别出会议环节', icon: 'none'})
-        return
-      }
-
-      const processedItems = items.map((item) => {
-        const duration = item.durationSec || item.duration || 60
-        return {
-          id: generateId('item'),
-          title: item.title || '未命名',
-          speaker: item.speaker || '主持人',
-          plannedDuration: duration,
-          startTime: item.startTime,
-          type: item.type || inferType(item.title || ''),
-          ruleId: duration > 180 ? 'long' : 'short',
-          parentTitle: item.parentTitle || undefined
-        }
+      console.log('parse job submitted:', {
+        jobId: submitResult.jobId,
+        status: submitResult.status
       })
 
-      const uniqueMeetingNo = await DatabaseService.generateUniqueMeetingNo(metadata?.meetingNo || null)
-
-      const newSession: MeetingSession = {
-        id: generateId('session'),
-        metadata: {
-          ...(metadata || {}),
-          meetingNo: uniqueMeetingNo
-        },
-        items: processedItems,
-        createdAt: Date.now(),
-        isCompleted: false
-      }
-
-      Taro.showLoading({title: '保存中...', mask: true})
-      const saveResult = await DatabaseService.saveMeeting(newSession)
-      Taro.hideLoading()
-
-      if (!saveResult.success) {
-        Taro.showToast({title: `保存失败：${saveResult.error}`, icon: 'none'})
-        return
-      }
-
-      const bootstrapResult = await AgendaV2DatabaseService.bootstrapAgendaFromSession(newSession)
-      if (!bootstrapResult.success) {
-        console.warn('导入会议后初始化 Agenda V2 失败:', bootstrapResult.error)
-      }
-
-      const versionedSession: MeetingSession = {
-        ...newSession,
-        agendaVersion: bootstrapResult.data?.agendaVersion || newSession.agendaVersion || 1
-      }
-
-      StorageService.saveSession(versionedSession, {syncToCloud: false})
-      setCurrentSession(versionedSession)
-
-      Taro.showToast({title: '会议已保存', icon: 'success', duration: 1500})
-      setTimeout(() => {
-        void goToTimeline()
-      }, 1500)
+      const parsedData = await waitForParseResult(submitResult.jobId)
+      await persistParsedMeeting(parsedData)
     } catch (error) {
       console.error('parse error:', error)
       Taro.hideLoading()
+      setParseStatusText('')
 
       const errorMessage = error instanceof Error ? error.message : '未知错误'
 
@@ -435,6 +554,9 @@ export default function ImportPage() {
             </View>
           )}
         </View>
+        {isLoading && parseStatusText ? (
+          <Text className="text-center text-xs text-muted-foreground block">{parseStatusText}</Text>
+        ) : null}
       </View>
     </View>
   )

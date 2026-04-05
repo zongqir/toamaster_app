@@ -1,5 +1,5 @@
 import Taro from '@tarojs/taro'
-import type {MeetingItem, MeetingSession} from '../types/meeting'
+import type {ImpromptuSpeechRecord, MeetingItem, MeetingSession} from '../types/meeting'
 import type {VotingCandidate, VotingGroup, VotingGroupType} from '../types/voting'
 import {generateId} from '../utils/id'
 
@@ -12,6 +12,16 @@ interface GroupingRule {
   name: string
   matcher: (item: MeetingItem) => boolean
   order: number
+}
+
+function isImpromptuRoleItem(item: MeetingItem) {
+  const normalizedTitle = item.title.trim().toLowerCase()
+  return (
+    normalizedTitle.includes('即兴主持') ||
+    normalizedTitle.includes('table topics master') ||
+    normalizedTitle.includes('即兴点评') ||
+    normalizedTitle.includes('table topics evaluator')
+  )
 }
 
 // 分组规则定义
@@ -31,7 +41,7 @@ const GROUPING_RULES: GroupingRule[] = [
   {
     type: 'tableTopics',
     name: '即兴演讲',
-    matcher: (item) => item.type === 'tableTopics',
+    matcher: (item) => item.type === 'tableTopics' && !isImpromptuRoleItem(item),
     order: 3
   },
   {
@@ -56,9 +66,9 @@ const GROUPING_RULES: GroupingRule[] = [
   },
   {
     type: 'others',
-    name: '其他角色',
+    name: '最佳角色',
     matcher: (item) => {
-      // 其他角色：role 类型但不是三官
+      if (isImpromptuRoleItem(item)) return true
       if (item.type !== 'role') return false
       const title = item.title.toLowerCase()
       const speaker = item.speaker?.toLowerCase() || ''
@@ -84,11 +94,49 @@ function calculateMaxSelections(candidateCount: number): number {
   return 3
 }
 
+function buildCandidatesFromItems(items: MeetingItem[]): VotingCandidate[] {
+  const candidateMap = new Map<string, MeetingItem>()
+  items.forEach((item) => {
+    if (item.speaker) {
+      candidateMap.set(item.speaker, item)
+    }
+  })
+
+  return Array.from(candidateMap.entries()).map(([name, item], index) => ({
+    id: generateId('cand'),
+    votingGroupId: '',
+    name,
+    itemId: item.id,
+    description: item.title,
+    orderIndex: index
+  }))
+}
+
+function buildCandidatesFromImpromptuRecords(records: ImpromptuSpeechRecord[]): VotingCandidate[] {
+  const candidateMap = new Map<string, ImpromptuSpeechRecord>()
+
+  records
+    .filter((record) => record.status === 'completed' && record.speechStartedAt && !record.deletedAt)
+    .forEach((record) => {
+      candidateMap.set(record.speakerName, record)
+    })
+
+  return Array.from(candidateMap.entries()).map(([name, record], index) => ({
+    id: generateId('cand'),
+    votingGroupId: '',
+    name,
+    itemId: record.agendaItemId,
+    description: `即兴演讲 ${index + 1}`,
+    orderIndex: index
+  }))
+}
+
 /**
  * 从会议中提取候选人并分组
  */
 export function groupCandidatesFromMeeting(session: MeetingSession): VotingGroup[] {
   const groups: Map<VotingGroupType, MeetingItem[]> = new Map()
+  const impromptuCandidates = buildCandidatesFromImpromptuRecords(session.impromptuRecords || [])
 
   // 初始化分组
   GROUPING_RULES.forEach((rule) => {
@@ -117,24 +165,12 @@ export function groupCandidatesFromMeeting(session: MeetingSession): VotingGroup
 
   GROUPING_RULES.forEach((rule) => {
     const items = groups.get(rule.type) || []
-    if (items.length === 0) return // 跳过空组
-
-    // 提取候选人（去重）
-    const candidateMap = new Map<string, MeetingItem>()
-    items.forEach((item) => {
-      if (item.speaker) {
-        candidateMap.set(item.speaker, item)
-      }
-    })
-
-    const candidates: VotingCandidate[] = Array.from(candidateMap.entries()).map(([name, item], index) => ({
-      id: generateId('cand'),
-      votingGroupId: '', // 稍后填充
-      name,
-      itemId: item.id,
-      description: item.title,
-      orderIndex: index
-    }))
+    const candidates =
+      rule.type === 'tableTopics'
+        ? impromptuCandidates.length > 0
+          ? impromptuCandidates
+          : buildCandidatesFromItems(items)
+        : buildCandidatesFromItems(items)
 
     if (candidates.length === 0) return // 跳过没有候选人的组
 

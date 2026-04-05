@@ -1,4 +1,4 @@
-project_id = "supabase276042665257123840"
+project_id = "oqizedfudvjufqchlaqy"
 
 [api]
 enabled = true
@@ -10,12 +10,12 @@ max_rows = 1000
 [db]
 port = 54322
 shadow_port = 54320
-major_version = 15
+major_version = 17
 
 [studio]
 enabled = true
 port = 54323
-api_url = "https://backend.appmiaoda.com"
+api_url = "https://oqizedfudvjufqchlaqy.supabase.co"
 
-[functions]
-enabled = true
+[edge_runtime]
+policy = "per_worker"

@@ -3,6 +3,8 @@ const pages = [
   'pages/import/index',
   'pages/timeline/index',
   'pages/timer/index',
+  'pages/timer-stats/index',
+  'pages/officer-notes/index',
   'pages/settings/index',
   'pages/vote-entrance/index',
   'pages/vote-edit/index',
@@ -30,7 +32,7 @@ export default defineAppConfig({
       },
       {
         pagePath: 'pages/vote-entrance/index',
-        text: '投票入口',
+        text: '投票',
         iconPath: './assets/images/unselected/vote.png',
         selectedIconPath: './assets/images/selected/vote.png'
       },

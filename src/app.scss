@@ -1,6 +1,6 @@
-﻿@use 'tailwindcss/base';
-@use 'tailwindcss/components';
-@use 'tailwindcss/utilities';
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
   --background: 214 52% 8%;
@@ -27,6 +27,7 @@
   --color-yellow: 45 88% 34%;
   --color-red: 0 74% 46%;
   --color-green: 142 66% 32%;
+  --color-purple: 277 70% 42%;
 
   --gradient-page:
     radial-gradient(1100px 520px at -8% -12%, hsl(187 88% 47% / 0.22), transparent 48%),
@@ -399,6 +400,50 @@
 
   .status-green {
     background-color: hsl(var(--color-green));
+  }
+
+  .status-purple {
+    background-color: hsl(var(--color-purple));
+  }
+
+  .timer-dial-white {
+    background: linear-gradient(180deg, hsl(0 0% 100% / 0.98), hsl(210 24% 94% / 0.96));
+    border-color: hsl(0 0% 100% / 0.85);
+    box-shadow:
+      0 18px 42px hsl(0 0% 100% / 0.18),
+      inset 0 1px 0 hsl(0 0% 100% / 0.9);
+  }
+
+  .timer-dial-green {
+    background: linear-gradient(180deg, hsl(142 63% 68% / 0.98), hsl(142 66% 52% / 0.96));
+    border-color: hsl(142 72% 80% / 0.85);
+    box-shadow:
+      0 18px 42px hsl(142 70% 38% / 0.3),
+      inset 0 1px 0 hsl(142 92% 92% / 0.72);
+  }
+
+  .timer-dial-yellow {
+    background: linear-gradient(180deg, hsl(49 100% 74% / 0.98), hsl(44 96% 58% / 0.96));
+    border-color: hsl(48 100% 86% / 0.86);
+    box-shadow:
+      0 18px 42px hsl(42 95% 44% / 0.3),
+      inset 0 1px 0 hsl(53 100% 94% / 0.72);
+  }
+
+  .timer-dial-red {
+    background: linear-gradient(180deg, hsl(0 90% 66% / 0.98), hsl(0 78% 50% / 0.96));
+    border-color: hsl(0 100% 86% / 0.84);
+    box-shadow:
+      0 18px 42px hsl(0 75% 38% / 0.34),
+      inset 0 1px 0 hsl(0 100% 92% / 0.4);
+  }
+
+  .timer-dial-purple {
+    background: linear-gradient(180deg, hsl(283 80% 67% / 0.98), hsl(274 72% 47% / 0.96));
+    border-color: hsl(287 94% 86% / 0.84);
+    box-shadow:
+      0 18px 42px hsl(274 70% 32% / 0.38),
+      inset 0 1px 0 hsl(290 100% 92% / 0.38);
   }
 
   .text-shadow-lg {

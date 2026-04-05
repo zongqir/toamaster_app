@@ -5,10 +5,14 @@ import {STORAGE_KEY_REDIRECT_PATH} from '@/components/RouteGuard'
 import {useAuth} from '@/contexts/AuthContext'
 import {safeRedirectTo, safeSwitchTab} from '@/utils/safeNavigation'
 
-const TAB_PAGE_PREFIXES = ['/pages/history/index', '/pages/vote-entrance/index', '/pages/settings/index']
+function getTabPagePrefixes() {
+  const app = Taro.getApp()
+  const tabBarList = app?.config?.tabBar?.list || []
+  return tabBarList.map((item: {pagePath: string}) => `/${item.pagePath}`)
+}
 
 function isTabPage(path: string): boolean {
-  return TAB_PAGE_PREFIXES.some((tabPath) => path.startsWith(tabPath))
+  return getTabPagePrefixes().some((tabPath) => path.startsWith(tabPath))
 }
 
 async function redirectAfterLogin() {
@@ -43,6 +47,12 @@ export default function LoginPage() {
     try {
       const {error} = await signInWithWechat()
       if (error) {
+        console.error('[login] signInWithWechat failed', {
+          name: error.name,
+          message: error.message,
+          stack: error.stack,
+          raw: error
+        })
         Taro.showToast({
           title: error.message || '微信登录失败',
           icon: 'none',
@@ -66,7 +76,11 @@ export default function LoginPage() {
         <Text className="block text-sm text-muted-foreground mb-6">
           登录后会同步微信昵称和头像，用于议程修改与投票操作审计。
         </Text>
-        <Button className="ui-btn-primary w-full" loading={isBusy} disabled={isBusy} onClick={() => void onWechatLogin()}>
+        <Button
+          className="ui-btn-primary w-full"
+          loading={isBusy}
+          disabled={isBusy}
+          onClick={() => void onWechatLogin()}>
           {isBusy ? '登录中...' : '微信一键登录'}
         </Button>
       </View>

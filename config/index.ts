@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 import {defineConfig, type UserConfigExport} from '@tarojs/cli'
 
@@ -12,6 +13,30 @@ import prodConfig from './prod'
 
 const base = String(process.argv[process.argv.length - 1])
 const publicPath = /^http/.test(base) ? base : '/'
+const outputRoot = process.env.TARO_ENV === 'h5' ? 'dist-h5' : 'dist'
+
+function ensureWeappPageWxssFiles(root: string) {
+  if (!fs.existsSync(root)) return
+
+  const stack = [root]
+  while (stack.length > 0) {
+    const current = stack.pop()
+    if (!current) continue
+
+    for (const entry of fs.readdirSync(current, {withFileTypes: true})) {
+      const entryPath = path.join(current, entry.name)
+      if (entry.isDirectory()) {
+        stack.push(entryPath)
+      }
+    }
+
+    const indexWxmlPath = path.join(current, 'index.wxml')
+    const indexWxssPath = path.join(current, 'index.wxss')
+    if (fs.existsSync(indexWxmlPath) && !fs.existsSync(indexWxssPath)) {
+      fs.writeFileSync(indexWxssPath, '')
+    }
+  }
+}
 
 // https://taro-docs.jd.com/docs/next/config#defineconfig-辅助函数
 export default defineConfig<'vite'>(async (merge) => {
@@ -26,7 +51,7 @@ export default defineConfig<'vite'>(async (merge) => {
       828: 1.81 / 2
     },
     sourceRoot: 'src',
-    outputRoot: 'dist',
+    outputRoot,
     plugins: ['@tarojs/plugin-generator'],
     alias: {
       '@': path.resolve(__dirname, '../src'),
@@ -51,6 +76,16 @@ export default defineConfig<'vite'>(async (merge) => {
               config.css?.postcss.plugins?.unshift(tailwindcss())
               config.css?.postcss.plugins?.push(inlineIconSvg)
             }
+          }
+        },
+        {
+          name: 'ensure-weapp-page-wxss-files',
+          apply: 'build',
+          closeBundle() {
+            if (process.env.TARO_ENV !== 'weapp') return
+
+            const pagesRoot = path.resolve(__dirname, '..', outputRoot, 'pages')
+            ensureWeappPageWxssFiles(pagesRoot)
           }
         },
         uvtw({
@@ -100,7 +135,7 @@ export default defineConfig<'vite'>(async (merge) => {
       staticDirectory: 'static',
 
       sassLoaderOption: {
-        additionalData: `@use "@/styles/overrides.scss";`
+        additionalData: `@use "@/styles/overrides.scss";\n`
       },
 
       miniCssExtractPluginOption: {

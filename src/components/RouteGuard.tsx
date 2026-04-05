@@ -1,6 +1,6 @@
 import type {TabBarItem} from '@tarojs/taro'
-import Taro, {useDidShow} from '@tarojs/taro'
-import {useCallback, useEffect, useState} from 'react'
+import Taro from '@tarojs/taro'
+import {useEffect, useState} from 'react'
 import {useAuth} from '@/contexts/AuthContext'
 
 // Public pages that don't require authentication
@@ -20,6 +20,22 @@ function getTabBarPages(): string[] {
 function isTabBarPage(path: string): boolean {
   const tabBarPages = getTabBarPages()
   return tabBarPages.some((tabBarPath) => path?.includes(tabBarPath))
+}
+
+function normalizePath(path: string): string {
+  if (!path) return ''
+  return path.startsWith('/') ? path : `/${path}`
+}
+
+function getCurrentPath(): string {
+  const getPages = (
+    globalThis as typeof globalThis & {
+      getCurrentPages?: () => Array<{route?: string}>
+    }
+  ).getCurrentPages
+  const pages = getPages?.() || []
+  const currentPage = pages[pages.length - 1]
+  return normalizePath(currentPage?.route || '')
 }
 
 // Throttled navigation to prevent duplicate redirects
@@ -48,43 +64,46 @@ function navigateToLogin(currentPath: string): void {
  */
 export function RouteGuard({children}: {children: React.ReactNode}) {
   const {user, loading} = useAuth()
-  const [shouldRender, setShouldRender] = useState(false)
+  const [currentPath, setCurrentPath] = useState(() => getCurrentPath())
 
-  const checkAuth = useCallback(() => {
-    if (loading) {
-      setShouldRender(false)
-      return
-    }
-
-    const currentPath: string = Taro.getCurrentInstance()?.router?.path || ''
-
-    // Allow access if user is authenticated or page is public
-    const isPublic = PUBLIC_PAGE_PATHS.some((publicPath) => currentPath?.includes(publicPath))
-    if (user || isPublic) {
-      setShouldRender(true)
-      return
-    }
-    if (currentPath && !currentPath?.includes(LOGIN_PAGE_PATH)) {
-      navigateToLogin(currentPath)
-      setShouldRender(false)
-      return
-    }
-    setShouldRender(false)
-  }, [user, loading])
-
-  // Check auth when page is shown (handles tab switching)
-  useDidShow(() => {
-    checkAuth()
-  })
-
-  // Check auth when component mounts or auth state changes
   useEffect(() => {
-    checkAuth()
-  }, [checkAuth])
+    const handleRouteChange = ({toLocation}: {toLocation?: {path?: string}} = {}) => {
+      const nextPath = normalizePath(toLocation?.path || getCurrentPath())
+      setCurrentPath((prevPath) => (prevPath === nextPath ? prevPath : nextPath))
+    }
 
-  if (!shouldRender) {
-    return null
-  }
+    Taro.eventCenter.on('__taroRouterChange', handleRouteChange)
+
+    return () => {
+      Taro.eventCenter.off('__taroRouterChange', handleRouteChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    const path = normalizePath(currentPath || getCurrentPath())
+    let redirectTimer: ReturnType<typeof setTimeout> | null = null
+
+    if (loading) {
+      return
+    }
+
+    const isPublic = PUBLIC_PAGE_PATHS.some((publicPath) => path.includes(publicPath))
+    if (user || isPublic) {
+      return
+    }
+
+    if (path && !path.includes(LOGIN_PAGE_PATH)) {
+      redirectTimer = setTimeout(() => {
+        navigateToLogin(path)
+      }, 0)
+    }
+
+    return () => {
+      if (redirectTimer) {
+        clearTimeout(redirectTimer)
+      }
+    }
+  }, [currentPath, loading, user])
 
   return <>{children}</>
 }

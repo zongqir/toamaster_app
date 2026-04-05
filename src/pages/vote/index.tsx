@@ -1,31 +1,33 @@
 import {Button, ScrollView, Text, View} from '@tarojs/components'
 import Taro, {useDidShow, useRouter} from '@tarojs/taro'
 import {useCallback, useEffect, useState} from 'react'
+import {STORAGE_KEY_REDIRECT_PATH} from '@/components/RouteGuard'
+import {useAuth} from '@/contexts/AuthContext'
 import {DatabaseService} from '../../db/database'
 import {VotingDatabaseService} from '../../db/votingDatabase'
-import {generateDeviceFingerprint, validateVoteSelections} from '../../services/votingService'
+import {validateVoteSelections} from '../../services/votingService'
 import type {VoteSubmission, VotingSession} from '../../types/voting'
 import {safeRedirectTo, safeSwitchTab} from '../../utils/safeNavigation'
 
 export default function VotePage() {
   const router = useRouter()
   const {id: sessionId} = router.params
+  const {user, profile, loading: authLoading} = useAuth()
 
   const [session, setSession] = useState<VotingSession | null>(null)
   const [loading, setLoading] = useState(true)
   const [selections, setSelections] = useState<Map<string, Set<string>>>(new Map())
   const [hasVoted, setHasVoted] = useState(false)
-  const [fingerprint, setFingerprint] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isEditing, setIsEditing] = useState(false) // 是否处于编辑模式
   const [meetingNo, setMeetingNo] = useState<string | number | null>(null) // 会议号
 
-  // 生成设备指纹
-  useEffect(() => {
-    const fp = generateDeviceFingerprint()
-    console.log('生成的设备指纹:', fp)
-    setFingerprint(fp)
-  }, [])
+  const voterNameSnapshot =
+    (typeof profile?.nickname === 'string' && profile.nickname) ||
+    (typeof profile?.name === 'string' && profile.name) ||
+    (typeof user?.user_metadata?.nickname === 'string' && user.user_metadata.nickname) ||
+    (typeof user?.user_metadata?.wechat_nickname === 'string' && user.user_metadata.wechat_nickname) ||
+    '微信用户'
 
   // 加载投票会话
   const loadSession = useCallback(async () => {
@@ -64,23 +66,28 @@ export default function VotePage() {
     loadSession()
   })
 
-  // 当 fingerprint 和 session 都准备好后，检查投票状态
+  // 当登录态和 session 都准备好后，检查投票状态
   useEffect(() => {
     const checkVotingStatus = async () => {
-      if (!sessionId || !fingerprint || !session) {
-        console.log('检查投票状态 - 条件不满足:', {sessionId, fingerprint: !!fingerprint, session: !!session})
+      if (!sessionId || !session || authLoading || !user?.id) {
+        console.log('检查投票状态 - 条件不满足:', {
+          sessionId,
+          session: !!session,
+          authLoading,
+          hasUser: !!user?.id
+        })
         return
       }
 
-      console.log('开始检查投票状态 - sessionId:', sessionId, 'fingerprint:', fingerprint)
-      const voted = await VotingDatabaseService.hasVoted(sessionId, fingerprint)
+      console.log('开始检查投票状态 - sessionId:', sessionId, 'userId:', user.id)
+      const voted = await VotingDatabaseService.hasVoted(sessionId, user.id)
       console.log('投票状态检查结果:', voted)
       setHasVoted(voted)
 
       // 如果已投票，加载之前的投票记录
       if (voted) {
         console.log('用户已投票，加载投票记录')
-        const userVotes = await VotingDatabaseService.getUserVotes(sessionId, fingerprint)
+        const userVotes = await VotingDatabaseService.getUserVotes(sessionId, user.id)
         console.log('用户投票记录:', userVotes)
         if (userVotes) {
           const newSelections = new Map<string, Set<string>>()
@@ -94,7 +101,7 @@ export default function VotePage() {
     }
 
     checkVotingStatus()
-  }, [sessionId, fingerprint, session])
+  }, [authLoading, sessionId, session, user?.id])
 
   // 切换候选人选择
   const toggleCandidate = (groupId: string, candidateId: string, maxSelections: number) => {
@@ -128,7 +135,13 @@ export default function VotePage() {
 
   // 提交投票
   const handleSubmit = async () => {
-    if (!session || !fingerprint || isSubmitting) return
+    if (!session || isSubmitting) return
+
+    if (!user?.id) {
+      Taro.setStorageSync(STORAGE_KEY_REDIRECT_PATH, `/pages/vote/index?id=${sessionId}`)
+      void safeRedirectTo('/pages/login/index')
+      return
+    }
 
     // 验证是否所有组都已选择
     const groups = session.groups || []
@@ -148,7 +161,8 @@ export default function VotePage() {
     const submission: VoteSubmission = {
       votingSessionId: sessionId!,
       voterName: '匿名', // 固定为匿名
-      voterFingerprint: fingerprint,
+      voterUserId: user.id,
+      voterNameSnapshot,
       selections: Array.from(selections.entries()).map(([groupId, candidateIds]) => ({
         groupId,
         candidateIds: Array.from(candidateIds)
@@ -196,7 +210,7 @@ export default function VotePage() {
         const maybeTransientError =
           !result.error || /timeout|network|fetch|request|failed|abort|offline|连接|超时|网络/i.test(result.error)
         if (!isUpdatingExistingVote && maybeTransientError && sessionId) {
-          const votedAfterError = await VotingDatabaseService.hasVoted(sessionId, fingerprint)
+          const votedAfterError = await VotingDatabaseService.hasVoted(sessionId, user.id)
           if (votedAfterError) {
             setHasVoted(true)
             setIsEditing(false)
@@ -245,7 +259,7 @@ export default function VotePage() {
     void safeRedirectTo(`/pages/vote-result/index?id=${sessionId}`)
   }
 
-  if (loading) {
+  if (loading || authLoading) {
     return (
       <View className="h-screen bg-gradient-page flex items-center justify-center">
         <Text className="text-muted-foreground">加载中...</Text>

@@ -5,6 +5,7 @@
 export type VotingGroupType = 'preparedSpeech' | 'evaluation' | 'tableTopics' | 'officials' | 'others'
 
 export type VotingSessionStatus = 'active' | 'closed'
+export type VoteTraceMode = 'anonymous' | 'auditable_private' | 'named'
 
 export interface VotingCandidate {
   id: string
@@ -32,6 +33,7 @@ export interface VotingSession {
   title: string
   description?: string
   status: VotingSessionStatus
+  voteTraceMode?: VoteTraceMode
   createdAt: number
   expiresAt?: number
   createdBy?: string
@@ -45,6 +47,8 @@ export interface Vote {
   candidateId: string
   voterName: string
   voterFingerprint: string
+  voterUserId?: string
+  voterNameSnapshot?: string
   createdAt: number
 }
 
@@ -54,7 +58,8 @@ export interface Vote {
 export interface VoteSubmission {
   votingSessionId: string
   voterName: string
-  voterFingerprint: string
+  voterUserId: string
+  voterNameSnapshot?: string
   selections: {
     groupId: string
     candidateIds: string[]
